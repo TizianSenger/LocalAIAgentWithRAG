@@ -1,18 +1,22 @@
 from langchain_ollama.llms import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 from vector import retriever
+from config import LLM_MODEL
 
-model = OllamaLLM(model="llama3.2")
+model = OllamaLLM(model=LLM_MODEL)
 
 template = """
-You are an exeprt in answering questions about a pizza restaurant
+You are an expert software documentation assistant for the natMSS codebase.
+Use the following notes from the Obsidian vault to answer the question.
+If the notes do not contain enough information, say so clearly.
 
-Here are some relevant reviews: {reviews}
+Relevant notes:
+{context}
 
-Here is the question to answer: {question}
+Question: {question}
 """
 prompt = ChatPromptTemplate.from_template(template)
-chain = prompt | model
+chain  = prompt | model
 
 while True:
     print("\n\n-------------------------------")
@@ -20,7 +24,7 @@ while True:
     print("\n\n")
     if question == "q":
         break
-    
-    reviews = retriever.invoke(question)
-    result = chain.invoke({"reviews": reviews, "question": question})
+
+    docs   = retriever.invoke(question)
+    result = chain.invoke({"context": docs, "question": question})
     print(result)
