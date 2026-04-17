@@ -111,22 +111,46 @@ def tool_grep(pattern: str, file_ext: str = '', max_results: int = 50) -> str:
     return '\n'.join(results) if results else 'No matches found.'
 
 
-def tool_read_file(relative_path: str, max_lines: int = 120) -> str:
-    """Read a file from the repository (relative path from repo root)."""
+def tool_read_file(relative_path: str, start_line: int = 0, max_lines: int = 120) -> str:
+    """Read a file from the repository (relative path from repo root).
+    start_line: 0-based line offset to start reading from (useful for large files).
+    """
     fpath = os.path.join(REPO_PATH, relative_path.replace('/', os.sep))
     if not os.path.exists(fpath):
         return f'File not found: {relative_path}'
     try:
         with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-        if len(lines) > max_lines:
-            half = max_lines // 2
-            snippet = lines[:half] + [f'\n... ({len(lines) - max_lines} lines omitted) ...\n'] + lines[-half:]
-        else:
-            snippet = lines
-        return f'// {relative_path}\n' + ''.join(snippet)
+            all_lines = f.readlines()
+        total = len(all_lines)
+        start_line = max(0, min(start_line, total - 1))
+        window = all_lines[start_line: start_line + max_lines]
+        header = f'// {relative_path}  [lines {start_line+1}–{start_line+len(window)}/{total}]\n'
+        if start_line + max_lines < total:
+            header += f'// (file continues — use READ_FILE({relative_path}, {start_line + max_lines}) for next section)\n'
+        return header + ''.join(window)
     except OSError as e:
         return f'Cannot read file: {e}'
+
+
+def tool_list_files(directory: str = '', ext: str = '') -> str:
+    """List source files in a directory of the repository (recursively, filtered by extension)."""
+    base = os.path.join(REPO_PATH, directory.replace('/', os.sep)) if directory else REPO_PATH
+    if not os.path.exists(base):
+        return f'Directory not found: {directory}'
+    results = []
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith('.')]
+        for fname in sorted(files):
+            if ext and not fname.endswith(ext):
+                continue
+            if not any(fname.endswith(e) for e in CODE_EXTENSIONS):
+                continue
+            rel = os.path.relpath(os.path.join(root, fname), REPO_PATH).replace('\\', '/')
+            results.append(rel)
+            if len(results) >= 200:
+                results.append('... (limited to 200 results)')
+                return '\n'.join(results)
+    return '\n'.join(results) if results else f'No files found in {directory or "repo root"}.'
 
 
 def tool_get_dependents(class_name: str) -> str:
@@ -169,9 +193,15 @@ GREP(<pattern>, <extension>)
   Search all files with given extension for a regex pattern.
   Example: GREP(password.*=.*"[^"]+", .py)
 
+LIST_FILES(<directory>, <extension>)
+  List source files in a directory (recursive). Use to navigate large projects.
+  Example: LIST_FILES(backend/services, .py)
+  Example: LIST_FILES(src, .ts)
+
 READ_FILE(<relative_path>)
-  Read a source file from the repository.
+  Read up to 120 lines of a source file. For large files, use an offset:
   Example: READ_FILE(src/auth/LoginService.java)
+  Example: READ_FILE(src/auth/LoginService.java, 120)   ← reads lines 121–240
 
 GET_DEPENDENTS(<ClassName>)
   Find all files that depend on a given class.
@@ -186,32 +216,32 @@ WRITE_FINDING(<severity>, <category>, <file>, <description>)
   Example: WRITE_FINDING(HIGH, security, src/auth/LoginService.py, SQL query built via string concatenation — potential SQL injection)
 """
 
-# ── LLM interaction ───────────────────────────────────────────────────────────
-
-_AGENT_SYSTEM = """You are an expert software architect performing an autonomous code analysis.
-You have access to tools to explore a large codebase (Java, Python, TypeScript, C#, Go, and others).
+_AGENT_SYSTEM = """You are an expert software architect performing an autonomous code analysis of a large, potentially legacy codebase.
 Your task is to find real issues in the code for the category: {category}.
 {category_desc}
 
 {tools}
 
 WORKFLOW:
-1. Use SEARCH_NOTES to find relevant classes for this category.
-2. Use READ_FILE, GREP, GET_CLASS_INFO, GET_DEPENDENTS to investigate further.
-3. For each real issue found, call WRITE_FINDING immediately.
-4. Continue investigating until you say DONE.
+1. Start with SEARCH_NOTES or LIST_FILES to orient yourself in the codebase.
+2. Use GREP to find suspicious patterns, READ_FILE to inspect specific files.
+3. For large files (>120 lines), use READ_FILE with an offset to read section by section.
+4. For each real, specific issue found, immediately call WRITE_FINDING.
+5. Keep investigating different files and patterns until you have exhausted the category.
+6. When done (minimum 6 tool calls), output exactly: DONE
 
 RULES:
-- Call exactly ONE tool per message. Wait for the result before continuing.
-- Be concise. Only investigate files relevant to the category.
-- Only call WRITE_FINDING for real, specific issues with a file path.
-- When you have investigated enough (at least 5 tool calls), output: DONE
+- Call exactly ONE tool per message. Wait for the result before the next call.
+- Never repeat the same tool call with identical arguments more than once.
+- Only call WRITE_FINDING for real, specific issues — include the exact file path.
+- Do NOT say DONE before making at least 6 tool calls.
+- The codebase may be large with many legacy files — keep exploring systematically.
 
-Start by searching for relevant code.
+Start now.
 """
 
 _TOOL_CALL_RE = re.compile(
-    r'(SEARCH_NOTES|GREP|READ_FILE|GET_DEPENDENTS|GET_CLASS_INFO|WRITE_FINDING)\((.+?)\)',
+    r'(SEARCH_NOTES|GREP|READ_FILE|LIST_FILES|GET_DEPENDENTS|GET_CLASS_INFO|WRITE_FINDING)\((.+?)\)',
     re.DOTALL
 )
 
@@ -240,10 +270,18 @@ def _run_tool(name: str, args: list) -> str:
         ext     = args[1].strip() if len(args) > 1 else ''
         return tool_grep(pattern, ext)
     if name == 'READ_FILE':
-        return tool_read_file(args[0] if args else '')
+        parts = args[0].split(',', 1) if args else ['']
+        path  = parts[0].strip()
+        try:
+            offset = int(parts[1].strip()) if len(parts) > 1 else 0
+        except ValueError:
+            offset = 0
+        return tool_read_file(path, start_line=offset)
+    if name == 'LIST_FILES':
+        directory = args[0] if args else ''
+        ext       = args[1] if len(args) > 1 else ''
+        return tool_list_files(directory, ext)
     if name == 'GET_DEPENDENTS':
-        return tool_get_dependents(args[0] if args else '')
-    if name == 'GET_CLASS_INFO':
         return tool_get_class_info(args[0] if args else '')
     if name == 'WRITE_FINDING':
         # handled by caller
@@ -273,8 +311,11 @@ class Finding:
 
 # ── Strategy runner ───────────────────────────────────────────────────────────
 
-def run_strategy(strategy: str, model, findings: list, budget_seconds: float, start_time: float) -> int:
-    """Run one analysis strategy. Returns number of tool calls made."""
+def run_strategy(strategy: str, model, findings: list, seen_keys: set,
+                 budget_seconds: float, start_time: float) -> int:
+    """Run one analysis strategy. Returns number of tool calls made.
+    seen_keys: shared set of (file, description_prefix) to avoid duplicate findings.
+    """
     desc       = STRATEGY_DESCRIPTIONS[strategy]
     system_msg = SystemMessage(content=_AGENT_SYSTEM.format(
         category=strategy,
@@ -283,11 +324,12 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
     ))
 
     tool_calls        = 0
-    min_calls         = 3   # must make at least this many tool calls before DONE is accepted
+    min_calls         = 6   # must make at least this many tool calls before DONE is accepted
     max_calls         = _SETTINGS.get('max_calls', 25)   # cap per strategy
     conversation      = []   # list of HumanMessage / AIMessage
     findings_at_start = len(findings)
     consecutive_done  = 0
+    consecutive_invalid = 0  # times model output neither tool call nor DONE
     last_tool_sig     = None   # (tool_name, first_arg) — repeat detection
     repeat_count      = 0
 
@@ -300,16 +342,34 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
             print(f'[agent] Time budget exhausted during {strategy}', flush=True)
             break
 
-        # Build message list directly — avoids ChatPromptTemplate interpreting
-        # { } in tool results as template variables
-        prompt_messages = [system_msg] + conversation
-        try:
-            response = model.invoke(prompt_messages)
-        except Exception as e:
-            print(f'[agent] LLM error: {e}', flush=True)
+        # Build message list — trim old tool results to keep within context window.
+        # Keep the last 8 messages verbatim; condense older HumanMessages with long content.
+        _MAX_RECENT = 8
+        if len(conversation) > _MAX_RECENT:
+            condensed = []
+            for msg in conversation[:-_MAX_RECENT]:
+                if isinstance(msg, HumanMessage) and len(msg.content) > 300:
+                    first_line = msg.content.splitlines()[0][:120]
+                    condensed.append(HumanMessage(content=f'[prior result condensed] {first_line}'))
+                else:
+                    condensed.append(msg)
+            prompt_messages = [system_msg] + condensed + conversation[-_MAX_RECENT:]
+        else:
+            prompt_messages = [system_msg] + conversation
+        # LLM call with retry/backoff
+        response_text = None
+        for attempt in range(3):
+            try:
+                response = model.invoke(prompt_messages)
+                response_text = str(response).strip()
+                break
+            except Exception as e:
+                wait = 2 ** attempt
+                print(f'[agent] LLM error (attempt {attempt+1}/3): {e} — retrying in {wait}s', flush=True)
+                time.sleep(wait)
+        if response_text is None:
+            print(f'[agent] LLM failed after 3 attempts — aborting strategy {strategy}', flush=True)
             break
-
-        response_text = str(response).strip()
         conversation.append(AIMessage(content=response_text))
 
         print(f'[agent] LLM ({tool_calls+1}/{max_calls}): {response_text[:300]}', flush=True)
@@ -317,22 +377,25 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
         # Done?
         if 'DONE' in response_text and not _TOOL_CALL_RE.search(response_text):
             consecutive_done += 1
-            new_findings = len(findings) - findings_at_start
-            # Accept DONE if: enough tool calls, OR found something, OR stuck in DONE loop
-            if tool_calls >= min_calls or new_findings > 0 or consecutive_done >= 2:
+            # Accept DONE only after min_calls, or if stuck in a DONE loop
+            if tool_calls >= min_calls or consecutive_done >= 2:
                 print(f'[agent] Strategy {strategy} complete.', flush=True)
                 break
             else:
-                conversation.append(HumanMessage(content=f'You said DONE too early. You must make at least {min_calls} tool calls first. Please continue investigating.'))
+                conversation.append(HumanMessage(content=f'You said DONE after only {tool_calls} tool calls. You must make at least {min_calls} before finishing. Keep investigating — try GREP, READ_FILE on different files, or LIST_FILES to find more issues.'))
                 continue
         consecutive_done = 0
 
         # Parse tool call
         tool_name, tool_args = _parse_tool_call(response_text)
         if not tool_name:
-            # No valid tool call — prompt again
+            consecutive_invalid += 1
+            if consecutive_invalid >= 4:
+                print(f'[agent] Strategy {strategy} aborted — model not producing valid output.', flush=True)
+                break
             conversation.append(HumanMessage(content='Please call exactly one tool from the list, or say DONE if finished.'))
             continue
+        consecutive_invalid = 0
 
         tool_calls += 1
 
@@ -359,11 +422,18 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
             category    = tool_args[1] if len(tool_args) > 1 else strategy
             file_path   = tool_args[2] if len(tool_args) > 2 else 'unknown'
             description = tool_args[3] if len(tool_args) > 3 else 'No description'
-            f = Finding(severity, category, file_path, description)
-            findings.append(f)
-            print(f'AGENT_FINDING:{json.dumps(f.to_dict())}', flush=True)
-            _emit_progress(strategy=strategy, tool_calls=tool_calls, findings=len(findings))
-            conversation.append(HumanMessage(content=f'Finding recorded: [{f.severity}] {f.description}'))
+            # Deduplicate: skip if same file + first 60 chars of description already seen
+            dedup_key = (file_path.strip(), description.strip()[:60].lower())
+            if dedup_key in seen_keys:
+                print(f'[agent] Duplicate finding skipped: {file_path}', flush=True)
+                conversation.append(HumanMessage(content=f'That finding was already recorded. Please investigate a DIFFERENT file or issue.'))
+            else:
+                seen_keys.add(dedup_key)
+                f = Finding(severity, category, file_path, description)
+                findings.append(f)
+                print(f'AGENT_FINDING:{json.dumps(f.to_dict())}', flush=True)
+                _emit_progress(strategy=strategy, tool_calls=tool_calls, findings=len(findings))
+                conversation.append(HumanMessage(content=f'Finding recorded: [{f.severity}] {f.description}. Good work! Now keep investigating — there may be more issues. Use GREP, READ_FILE, or LIST_FILES to explore further. Do NOT say DONE yet.'))
         else:
             print(f'[agent] Tool call: {tool_name}({", ".join(tool_args[:2])})', flush=True)
             result = _run_tool(tool_name, tool_args)
@@ -483,6 +553,7 @@ def main():
 
     model      = OllamaLLM(model=LLM_MODEL, temperature=0.1)
     findings   = []
+    seen_keys  = set()   # deduplication across all strategies
     start_time = time.time()
 
     for strategy in focus:
@@ -490,7 +561,7 @@ def main():
             print('[agent] Time budget reached — stopping early.', flush=True)
             break
         remaining = budget_seconds - (time.time() - start_time)
-        run_strategy(strategy, model, findings, budget_seconds, start_time)
+        run_strategy(strategy, model, findings, seen_keys, budget_seconds, start_time)
 
     elapsed = time.time() - start_time
     report  = generate_report(findings, focus, elapsed)

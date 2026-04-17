@@ -13,14 +13,35 @@ Analysiert automatisch jede Quellcode-Datei im Repository mit einem lokalen LLM 
 Stellt einen lokalen HTTP-Server (Flask, Port 5001) bereit, über den du in natürlicher Sprache Fragen zu deinem Code stellen kannst. Antworten basieren auf einem **Retrieval-Augmented Generation (RAG)**-System: Relevante Notizen aus dem Obsidian Vault werden via ChromaDB semantisch gesucht und als Kontext an das LLM übergeben. Der Vault-Index wird persistent auf Disk gespeichert (`chrome_langchain_db/`) — beim Start wird nichts neu eingebettet, außer der Index ist leer.
 
 ### 🤖 Autonomer Code-Analyse-Agent
-Ein eigenständiger Agent der dein Repository nach konkreten Code-Problemen durchsucht. Der Agent arbeitet mit einem konfigurierbaren **Budget** (Minuten) und mehreren **Strategien**:
+Ein eigenständiger Agent der dein Repository nach konkreten Code-Problemen durchsucht. Der Agent arbeitet mit einem konfigurierbaren **Budget** (Minuten) oder im **Full-Scan-Modus** (kein Zeitlimit) und mehreren **Strategien**:
 - **Security** — SQL-Injection, fehlende Validierung, Hardcoded Secrets
 - **Performance** — N+1-Queries, blockierendes I/O, überflüssige Objekterzeugung
 - **Potential Bugs** — Null-Pointer-Risiken, Resource Leaks, Race Conditions
 - **Architecture** — Zirkuläre Dependencies, God Classes, SOLID-Verletzungen
 - **Code Smell** — Duplikate, tote Code-Pfade, Magic Numbers, schlechtes Naming
 
-Der Agent nutzt dafür echte Tools (`GREP`, `READ_FILE`, `SEARCH_NOTES`, `GET_CLASS_INFO`, `GET_DEPENDENTS`) und schreibt am Ende einen Markdown-Report direkt in den Obsidian Vault (`AgentReports/`).
+Der Agent nutzt dafür echte Tools und schreibt am Ende einen Markdown-Report direkt in den Obsidian Vault (`AgentReports/`).
+
+**Verfügbare Tools des Agents:**
+
+| Tool | Beschreibung |
+|---|---|
+| `SEARCH_NOTES(query)` | Semantische Suche im Obsidian Vault via ChromaDB |
+| `GREP(pattern, .ext)` | Regex-Suche über alle Dateien mit gegebener Endung |
+| `LIST_FILES(dir, .ext)` | Verzeichnis-Listing im Repo (für große Projekte) |
+| `READ_FILE(path)` | Liest bis zu 120 Zeilen einer Datei |
+| `READ_FILE(path, offset)` | Liest ab Zeile `offset` (für sehr große Dateien sektionsweise) |
+| `GET_DEPENDENTS(Class)` | Alle Dateien die eine Klasse importieren/erweitern |
+| `GET_CLASS_INFO(Class)` | Strukturinfo einer Klasse (Package, Extends, Injects) |
+| `WRITE_FINDING(sev, cat, file, desc)` | Schreibt ein Finding in den Report |
+
+**Robustheit:**
+- LLM-Fehler: 3 Versuche mit exponentiellem Backoff
+- Repeat-Schutz: nach 2 identischen Tool-Calls wird das Modell umgeleitet, nach 5 wird die Strategie abgebrochen
+- Invalid-Output-Schutz: nach 4 ungültigen Antworten hintereinander bricht die Strategie ab
+- Finding-Deduplizierung: gleiches Findings wird nie doppelt gespeichert
+- Context-Trimming: ältere Tool-Ergebnisse werden kondensiert damit das Kontextfenster nicht überläuft
+- VRAM-Freigabe: Modell wird nach Abschluss automatisch aus dem VRAM entladen (`keep_alive=0`)
 
 ### 📊 Dependency Graph
 Generiert einen interaktiven Abhängigkeitsgraphen des gesamten Repositories. Nodes sind Klassen/Module, Kanten sind Import-/Vererbungs-Beziehungen. Einfärbt nach Ordner/Modul. Filterbar, durchsuchbar, zoombar — direkt in der App.
@@ -95,7 +116,7 @@ npx electron .
 1. **Ollama starten** — Sidebar → *Start Ollama*
 2. **Indexer starten** — Sidebar → *Start Indexer* (beim ersten Mal dauert das je nach Projektgröße mehrere Stunden)
 3. **Chat API starten** — Sidebar → *Start Chat API* → Chat-Tab öffnen und Fragen stellen
-4. **Agent starten** — Agent-Tab → Budget und Strategie wählen → *Start Analysis*
+4. **Agent starten** — Agent-Tab → Budget (oder "Full Scan" für kein Zeitlimit) und Strategie wählen → *Start Analysis*
 5. **Graph generieren** — Graph-Tab → *Generate Graph*
 
 ---
