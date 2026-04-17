@@ -360,6 +360,7 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
         response_text = None
         for attempt in range(3):
             try:
+                print(f'[agent] Querying LLM…', flush=True)
                 response = model.invoke(prompt_messages)
                 response_text = str(response).strip()
                 break
@@ -551,7 +552,9 @@ def main():
     print(f'[agent] Model: {LLM_MODEL}', flush=True)
     _emit_progress(strategy='init', tool_calls=0, findings=0)
 
-    model      = OllamaLLM(model=LLM_MODEL, temperature=0.1)
+    llm_timeout = _get_model_timeout(LLM_MODEL)
+    print(f'[agent] LLM timeout: {llm_timeout}s (based on model size)', flush=True)
+    model      = OllamaLLM(model=LLM_MODEL, temperature=0.1, timeout=llm_timeout)
     findings   = []
     seen_keys  = set()   # deduplication across all strategies
     start_time = time.time()
@@ -590,6 +593,36 @@ def main():
         print(f'[agent] Model unloaded from VRAM.', flush=True)
     except Exception as e:
         print(f'[agent] VRAM unload skipped: {e}', flush=True)
+
+
+def _get_model_timeout(model_name: str) -> int:
+    """Query Ollama for the model size and return an appropriate timeout in seconds.
+
+    Thresholds (unquantized parameter count estimate via file size):
+      < 4 GB  → small  (e.g. 3b / 7b Q4) → 60 s
+      < 10 GB → medium (e.g. 14b Q4)     → 120 s
+      < 20 GB → large  (e.g. 32b Q4)     → 240 s
+      >= 20 GB → xlarge (e.g. 70b+)       → 360 s
+    Falls back to 180 s if Ollama is unreachable.
+    """
+    try:
+        req = urllib.request.Request('http://localhost:11434/api/tags')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+        for m in data.get('models', []):
+            if m.get('name') == model_name:
+                size_gb = m.get('size', 0) / 1_073_741_824
+                if size_gb < 4:
+                    return 60
+                elif size_gb < 10:
+                    return 120
+                elif size_gb < 20:
+                    return 240
+                else:
+                    return 360
+    except Exception:
+        pass
+    return 180  # fallback
 
 
 if __name__ == '__main__':

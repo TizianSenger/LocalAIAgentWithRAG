@@ -449,17 +449,28 @@ function saveSettings (patch) {
   window.api.saveSettings(patch)
 }
 
+function fmtModelSize (bytes) {
+  if (!bytes) return ''
+  const gb = bytes / 1073741824
+  return gb >= 1 ? ` (${gb.toFixed(1)} GB)` : ` (${(bytes / 1048576).toFixed(0)} MB)`
+}
+
 function populateSelect (sel, models, defaultVal) {
-  const prev = sel.value || defaultVal
+  // models is [{name, size}] or [string] (fallback)
+  const toObj  = m => typeof m === 'string' ? { name: m, size: 0 } : m
+  const items  = models.map(toObj)
+  const names  = items.map(m => m.name)
+  const prev   = sel.value || defaultVal
   sel.innerHTML = ''
-  models.forEach(m => {
+  items.forEach(m => {
     const opt = document.createElement('option')
-    opt.value = opt.textContent = m
-    if (m === prev) opt.selected = true
+    opt.value       = m.name
+    opt.textContent = m.name + fmtModelSize(m.size)
+    if (m.name === prev) opt.selected = true
     sel.appendChild(opt)
   })
   // If previous selection not in list, add it as first option
-  if (!models.includes(prev)) {
+  if (!names.includes(prev)) {
     const opt = document.createElement('option')
     opt.value = opt.textContent = prev
     opt.selected = true

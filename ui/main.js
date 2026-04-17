@@ -44,7 +44,7 @@ function fetchOllamaModels () {
       res.on('end', () => {
         try {
           const models = JSON.parse(data).models || []
-          resolve(models.map(m => m.name))
+          resolve(models.map(m => ({ name: m.name, size: m.size || 0 })))
         } catch { resolve([]) }
       })
     }).on('error', () => resolve([]))
