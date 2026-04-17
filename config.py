@@ -7,6 +7,15 @@ STATE_FILE      = r"C:\natMSSObsidian\natMSS\.indexer_state.json"
 
 LLM_MODEL   = "qwen2.5-coder:32b"
 EMBED_MODEL = "mxbai-embed-large"
+# variants for embedings:
+#mxbai-embed-large
+#nomic-embed-text
+#bge-m3
+
+# Number of files analysed in parallel.
+# With a single GPU, 4–6 is a good starting point.
+# Increase if GPU utilisation stays below 80%, decrease if Ollama errors out.
+INDEXER_WORKERS = 1
 
 PYTHON_EXE = sys.executable
 

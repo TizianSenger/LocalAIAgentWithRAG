@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+env/
+
+# ChromaDB / Vector store
+chrome_langchain_db/
+*.sqlite3
+
+# Electron / Node
+ui/node_modules/
+ui/.webpack/
+ui/dist/
+ui/out/
+
+# Electron user data (settings.json etc.)
+# Deliberately NOT ignored so settings can be shared — remove this comment if you want to ignore it
+# app_data/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env / secrets
+.env
+.env.*
+secrets.py

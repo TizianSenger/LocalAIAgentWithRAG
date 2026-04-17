@@ -1,0 +1,12 @@
+{
+  "name": "natmss-agent-ui",
+  "version": "1.0.0",
+  "description": "natMSS Code Intelligence Agent UI",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^30.0.0"
+  }
+}
