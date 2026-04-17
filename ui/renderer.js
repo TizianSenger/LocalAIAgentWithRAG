@@ -32,7 +32,7 @@ document.getElementById('win-close').addEventListener('click',    () => window.a
 
 // --- Log output ---
 const logOutput  = document.getElementById('log-output')
-let   logFilter  = 'all'
+let   logFilters = new Set(['all'])  // multi-select; 'all' means no filter
 const logEntries = []
 
 function pad2 (n) { return String(n).padStart(2, '0') }
@@ -43,7 +43,7 @@ function timestamp () {
 
 function appendLog (entry) {
   logEntries.push(entry)
-  if (logFilter !== 'all' && entry.source !== logFilter) return
+  if (!logFilters.has('all') && !logFilters.has(entry.source)) return
   renderLogEntry(entry)
 }
 
@@ -70,15 +70,32 @@ function escapeHtml (s) {
 function reRenderLog () {
   logOutput.innerHTML = ''
   logEntries.forEach(e => {
-    if (logFilter === 'all' || e.source === logFilter) renderLogEntry(e)
+    if (logFilters.has('all') || logFilters.has(e.source)) renderLogEntry(e)
   })
 }
 
 document.querySelectorAll('.filter-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'))
-    btn.classList.add('active')
-    logFilter = btn.dataset.filter
+    const f = btn.dataset.filter
+    if (f === 'all') {
+      // All resets everything
+      logFilters = new Set(['all'])
+    } else {
+      logFilters.delete('all')
+      if (logFilters.has(f)) {
+        logFilters.delete(f)
+        if (logFilters.size === 0) logFilters.add('all') // nothing selected → back to all
+      } else {
+        logFilters.add(f)
+      }
+    }
+    // Sync button states
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      const isAll = b.dataset.filter === 'all'
+      b.classList.toggle('active',
+        logFilters.has('all') ? isAll : logFilters.has(b.dataset.filter)
+      )
+    })
     reRenderLog()
   })
 })
@@ -132,12 +149,14 @@ window.api.onStats(({ cpu, ramUsed, ramTotal, gpu }) => {
 })
 
 // --- Ollama health ---
+let _ollamaWasRunning = false
 window.api.onOllamaHealth(({ running }) => {
   const pill = document.getElementById('ollama-pill')
   const text = document.getElementById('ollama-pill-text')
   pill.className = `ollama-pill${running ? ' online' : ''}`
   text.textContent = running ? 'Ollama Online' : 'Ollama Offline'
-  if (running) refreshModels()
+  if (running && !_ollamaWasRunning) refreshModels()
+  _ollamaWasRunning = running
 })
 
 // --- Progress bar ---
@@ -448,17 +467,20 @@ function populateSelect (sel, models, defaultVal) {
   }
 }
 
+let _refreshingModels = false
 async function refreshModels () {
   const models = await window.api.getModels()
   if (!models || models.length === 0) {
     // Leave dropdowns with placeholder so user knows Ollama isn't up
     return
   }
+  _refreshingModels = true
   const s = _settings
   populateSelect(selectLlm,      models, s.llm   || DEFAULT_LLM)
   populateSelect(selectChatLlm,  models, s.chat  || DEFAULT_CHAT)
   populateSelect(selectAgentLlm, models, s.agent || DEFAULT_AGENT)
   populateSelect(selectEmbed,    models, s.embed || DEFAULT_EMBED)
+  _refreshingModels = false
   window.api.setLlmModel(selectLlm.value)
   window.api.setChatModel(selectChatLlm.value)
   window.api.setAgentModel(selectAgentLlm.value)
@@ -466,18 +488,22 @@ async function refreshModels () {
 }
 
 selectLlm.addEventListener('change', () => {
+  if (_refreshingModels) return
   saveSettings({ llm: selectLlm.value })
   window.api.setLlmModel(selectLlm.value)
 })
 selectChatLlm.addEventListener('change', () => {
+  if (_refreshingModels) return
   saveSettings({ chat: selectChatLlm.value })
   window.api.setChatModel(selectChatLlm.value)
 })
 selectAgentLlm.addEventListener('change', () => {
+  if (_refreshingModels) return
   saveSettings({ agent: selectAgentLlm.value })
   window.api.setAgentModel(selectAgentLlm.value)
 })
 selectEmbed.addEventListener('change', () => {
+  if (_refreshingModels) return
   saveSettings({ embed: selectEmbed.value })
   window.api.setEmbedModel(selectEmbed.value)
 })
@@ -639,3 +665,114 @@ window.api.requestStatus()
 loadSettings().then(() => refreshModels())
 appendLog({ source: 'system', text: 'natMSS Agent UI ready.', type: 'info', ts: timestamp() })
 
+// ─── Auto Mode ────────────────────────────────────────────────────────────────
+const autoModeToggle  = document.getElementById('auto-mode-toggle')
+const autoModeStatus  = document.getElementById('auto-mode-status')
+const btnAutoSettings = document.getElementById('btn-auto-settings')
+const autoModal       = document.getElementById('automode-modal')
+
+const DAY_NAMES = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa']
+
+function formatAutoStatus (cfg) {
+  if (!cfg.enabled) return 'Deactivated'
+  const dayLabels = cfg.days.map(d => DAY_NAMES[d]).join(' ')
+  return `Active — ${cfg.time} | ${dayLabels}`
+}
+
+async function openAutoModal () {
+  const cfg = await window.api.getAutoMode()
+
+  // Fill time
+  document.getElementById('auto-time').value   = cfg.time    || '19:00'
+  document.getElementById('auto-focus').value   = cfg.focus   || 'all'
+  document.getElementById('auto-max-calls').value = cfg.maxCalls ?? 25
+
+  const fullScanCb    = document.getElementById('auto-full-scan')
+  const budgetInput   = document.getElementById('auto-budget')
+  fullScanCb.checked  = !!cfg.fullScan
+  budgetInput.value   = cfg.budget ?? 60
+  budgetInput.disabled       = fullScanCb.checked
+  budgetInput.style.opacity  = fullScanCb.checked ? '0.35' : '1'
+  fullScanCb.onchange = () => {
+    budgetInput.disabled      = fullScanCb.checked
+    budgetInput.style.opacity = fullScanCb.checked ? '0.35' : '1'
+  }
+
+  // Fill day checkboxes
+  const days = cfg.days || [1,2,3,4,5]
+  document.querySelectorAll('#auto-days input[type=checkbox]').forEach(cb => {
+    cb.checked = days.includes(parseInt(cb.value))
+  })
+
+  // Fill model selects
+  const models = await window.api.getModels()
+  ;['auto-agent-model', 'auto-embed-model'].forEach(id => {
+    const sel = document.getElementById(id)
+    sel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('')
+  })
+  document.getElementById('auto-agent-model').value = cfg.agentModel || ''
+  document.getElementById('auto-embed-model').value = cfg.embedModel || ''
+
+  autoModal.style.display = 'flex'
+}
+
+function closeAutoModal () {
+  autoModal.style.display = 'none'
+}
+
+btnAutoSettings.addEventListener('click', openAutoModal)
+document.getElementById('btn-automode-cancel').addEventListener('click', closeAutoModal)
+autoModal.addEventListener('click', e => { if (e.target === autoModal) closeAutoModal() })
+
+document.getElementById('btn-automode-save').addEventListener('click', () => {
+  const days = []
+  document.querySelectorAll('#auto-days input[type=checkbox]').forEach(cb => {
+    if (cb.checked) days.push(parseInt(cb.value))
+  })
+  const cfg = {
+    enabled:    autoModeToggle.checked,
+    time:       document.getElementById('auto-time').value,
+    days,
+    agentModel: document.getElementById('auto-agent-model').value,
+    embedModel: document.getElementById('auto-embed-model').value,
+    fullScan:   document.getElementById('auto-full-scan').checked,
+    budget:     parseInt(document.getElementById('auto-budget').value) || 60,
+    focus:      document.getElementById('auto-focus').value,
+    maxCalls:   parseInt(document.getElementById('auto-max-calls').value) || 25,
+  }
+  window.api.saveAutoMode(cfg)
+  autoModeToggle.checked = cfg.enabled
+  autoModeStatus.textContent = formatAutoStatus(cfg)
+  closeAutoModal()
+  appendLog({ source: 'system', text: `[auto] Settings saved — ${formatAutoStatus(cfg)}`, type: 'info', ts: timestamp() })
+})
+
+autoModeToggle.addEventListener('change', () => {
+  window.api.setAutoModeEnabled(autoModeToggle.checked)
+  window.api.getAutoMode().then(cfg => {
+    autoModeStatus.textContent = formatAutoStatus({ ...cfg, enabled: autoModeToggle.checked })
+  })
+})
+
+window.api.onAutoModeStatus(({ enabled, time, days }) => {
+  autoModeToggle.checked = enabled
+  autoModeStatus.textContent = formatAutoStatus({ enabled, time, days })
+})
+
+window.api.onAutoModeWorkflowStart(() => {
+  appendLog({ source: 'system', text: '[auto] Scheduled workflow started (update → index → agent)', type: 'info', ts: timestamp() })
+})
+
+window.api.onAutoModeWorkflowDone(({ success, step }) => {
+  if (success) {
+    appendLog({ source: 'system', text: '[auto] Workflow completed successfully.', type: 'info', ts: timestamp() })
+  } else {
+    appendLog({ source: 'system', text: `[auto] Workflow failed at step: ${step || 'agent'}`, type: 'error', ts: timestamp() })
+  }
+})
+
+// Load initial auto mode state
+window.api.getAutoMode().then(cfg => {
+  autoModeToggle.checked = cfg.enabled
+  autoModeStatus.textContent = formatAutoStatus(cfg)
+})

@@ -65,12 +65,16 @@ function createWindow () {
     },
   })
   mainWindow.loadFile(path.join(__dirname, 'index.html'))
-  mainWindow.webContents.once('did-finish-load', () => startPolling())
+  mainWindow.webContents.once('did-finish-load', () => {
+    startPolling()
+    // Start auto-mode scheduler if enabled
+    const amCfg = getAutoSettings()
+    if (amCfg.enabled) scheduleAutoMode()
+  })
 }
 
 app.whenReady().then(createWindow)
 app.on('window-all-closed', () => { stopPolling(); killAll(); app.quit() })
-
 // ─── CPU usage ────────────────────────────────────────────────────────────────
 function getCpuPercent () {
   const cpus = os.cpus()
@@ -445,3 +449,176 @@ ipcMain.on('request-status', () => {
     setStatus(key, p ? 'running' : 'stopped')
   )
 })
+
+// ─── Auto Mode ────────────────────────────────────────────────────────────────
+let autoModeTimer  = null
+let autoModeActive = false
+
+function getAutoSettings () {
+  const s = readSettings()
+  return s.autoMode || {
+    enabled:   false,
+    time:      '19:00',
+    days:      [1, 2, 3, 4, 5],   // Mon–Fri
+    agentModel: selectedAgentModel,
+    embedModel: selectedEmbedModel,
+    budget:    60,
+    focus:     'all',
+    maxCalls:  25,
+  }
+}
+
+function autoModeRunWorkflow () {
+  const cfg = getAutoSettings()
+  log('system', '[auto] Starting scheduled workflow…', 'info')
+  send('auto-mode-workflow-start', {})
+
+  // Step 1: git pull + incremental index via update.py
+  const env = {
+    ...process.env,
+    PYTHONUNBUFFERED:  '1',
+    PYTHONIOENCODING:  'utf-8',
+    OVERRIDE_LLM_MODEL:   selectedLlmModel,
+    OVERRIDE_CHAT_MODEL:  selectedChatModel,
+    OVERRIDE_EMBED_MODEL: cfg.embedModel || selectedEmbedModel,
+    OVERRIDE_AGENT_MODEL: cfg.agentModel || selectedAgentModel,
+    CHAT_RAG_K: String(chatRagK),
+  }
+
+  log('system', '[auto] Step 1/3 — git pull + update…', 'info')
+  const update = spawn(PYTHON, ['-u', 'update.py'], { cwd: SCRIPTS_DIR, shell: true, env })
+  procs.update = update
+  setStatus('update', 'running')
+
+  update.stdout.on('data', d => d.toString().split('\n').forEach(l => l.trim() && log('update', l)))
+  update.stderr.on('data', d => log('update', d.toString(), 'stderr'))
+
+  update.on('close', code => {
+    procs.update = null
+    setStatus('update', code === 0 ? 'stopped' : 'error')
+    log('system', `[auto] update.py exited (${code})`, code === 0 ? 'info' : 'error')
+    send('indexer-done', { code })
+
+    if (code !== 0) {
+      log('system', '[auto] Workflow aborted — update failed.', 'error')
+      send('auto-mode-workflow-done', { success: false, step: 'update' })
+      return
+    }
+
+    // Step 2: incremental indexer
+    log('system', '[auto] Step 2/3 — indexer…', 'info')
+    const idx = spawn(PYTHON, ['-u', 'indexer.py', '--workers', String(indexerWorkers)], { cwd: SCRIPTS_DIR, shell: true, env })
+    procs.indexer = idx
+    setStatus('indexer', 'running')
+
+    idx.stdout.on('data', d => {
+      d.toString().split('\n').forEach(line => {
+        if (line.startsWith('PROGRESS:')) {
+          try { send('indexer-progress', JSON.parse(line.slice(9))) } catch (_) {}
+        } else if (line.trim()) { log('indexer', line) }
+      })
+    })
+    idx.stderr.on('data', d => log('indexer', d.toString(), 'stderr'))
+
+    idx.on('close', idxCode => {
+      procs.indexer = null
+      setStatus('indexer', idxCode === 0 ? 'stopped' : 'error')
+      log('system', `[auto] indexer.py exited (${idxCode})`, idxCode === 0 ? 'info' : 'error')
+      send('indexer-done', { code: idxCode })
+
+      if (idxCode !== 0) {
+        log('system', '[auto] Workflow aborted — indexer failed.', 'error')
+        send('auto-mode-workflow-done', { success: false, step: 'indexer' })
+        return
+      }
+
+      // Step 3: agent
+      log('system', `[auto] Step 3/3 — agent (${cfg.fullScan ? 'Full Scan' : cfg.budget + ' min'}, focus: ${cfg.focus || 'all'})…`, 'info')
+      const agentArgs = [
+        '-u', '-B', path.join(SCRIPTS_DIR, 'agent.py'),
+        '--budget-minutes', cfg.fullScan ? '0' : String(cfg.budget || 60),
+        '--focus',          cfg.focus    || 'all',
+        '--max-calls',      String(cfg.maxCalls || 25),
+        '--grep-limit',     '50',
+        '--notes-k',        '8',
+      ]
+      const agent = spawn(PYTHON, agentArgs, { cwd: SCRIPTS_DIR, shell: true, env })
+      procs.agent = agent
+      setStatus('agent', 'running')
+      send('process-status', { source: 'agent', status: 'running' })
+
+      agent.stdout.on('data', raw => {
+        raw.toString('utf8').split('\n').forEach(line => {
+          if (!line.trim()) return
+          if (line.startsWith('AGENT_PROGRESS:')) {
+            try { send('agent-progress', JSON.parse(line.slice(15))) } catch {}
+          } else if (line.startsWith('AGENT_FINDING:')) {
+            try { send('agent-finding', JSON.parse(line.slice(14))) } catch {}
+          } else if (line.startsWith('AGENT_DONE:')) {
+            try { send('agent-done', JSON.parse(line.slice(11))) } catch {}
+          } else {
+            send('process-output', { source: 'agent', text: line, type: 'stdout' })
+          }
+        })
+      })
+      agent.stderr.on('data', raw => send('process-output', { source: 'agent', text: raw.toString(), type: 'stderr' }))
+      agent.on('close', agentCode => {
+        procs.agent = null
+        setStatus('agent', agentCode === 0 ? 'stopped' : 'error')
+        send('process-status', { source: 'agent', status: agentCode === 0 ? 'stopped' : 'error' })
+        log('system', `[auto] agent.py exited (${agentCode})`, agentCode === 0 ? 'info' : 'error')
+        send('auto-mode-workflow-done', { success: agentCode === 0 })
+      })
+    })
+  })
+}
+
+function scheduleAutoMode () {
+  if (autoModeTimer) { clearInterval(autoModeTimer); autoModeTimer = null }
+  const cfg = getAutoSettings()
+  if (!cfg.enabled) { autoModeActive = false; return }
+
+  autoModeActive = true
+  log('system', `[auto] Scheduler active — runs at ${cfg.time} on days ${cfg.days.join(',')}`, 'info')
+
+  // Check every 60 seconds
+  let lastFiredDate = ''
+  autoModeTimer = setInterval(() => {
+    const now  = new Date()
+    const hhmm = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0')
+    const day  = now.getDay()   // 0=Sun … 6=Sat
+    const date = now.toDateString()
+
+    if (hhmm === cfg.time && cfg.days.includes(day) && date !== lastFiredDate) {
+      lastFiredDate = date
+      // Don't start if something is already running
+      if (procs.update || procs.indexer || procs.agent) {
+        log('system', '[auto] Skipping — a process is already running.', 'info')
+        return
+      }
+      autoModeRunWorkflow()
+    }
+
+    // Update status label every tick
+    send('auto-mode-status', { enabled: true, time: cfg.time, days: cfg.days })
+  }, 60_000)
+
+  // Send initial status immediately
+  send('auto-mode-status', { enabled: true, time: cfg.time, days: cfg.days })
+}
+
+ipcMain.on('auto-mode-set-enabled', (_, enabled) => {
+  const s = readSettings()
+  const am = s.autoMode || {}
+  writeSettings({ ...s, autoMode: { ...am, enabled } })
+  scheduleAutoMode()
+  send('auto-mode-status', { enabled, time: am.time || '19:00', days: am.days || [1,2,3,4,5] })
+})
+
+ipcMain.on('auto-mode-save', (_, cfg) => {
+  const s = readSettings()
+  writeSettings({ ...s, autoMode: cfg })
+  scheduleAutoMode()
+})
+
+ipcMain.handle('auto-mode-get', async () => getAutoSettings())

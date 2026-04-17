@@ -422,6 +422,16 @@
       <button class="btn primary" id="btn-start-agent"><span class="icon">🤖</span> Start Analysis</button>
       <button class="btn stop"    id="btn-stop-agent"  style="display:none"> <span class="icon">■</span> Stop Agent</button>
     </div>
+
+    <div class="btn-group">
+      <h3>Auto Mode</h3>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <input type="checkbox" id="auto-mode-toggle" style="width:14px;height:14px;cursor:pointer;accent-color:var(--accent)">
+        <label for="auto-mode-toggle" style="cursor:pointer;font-size:13px;color:var(--text)">Enable Auto Mode</label>
+      </div>
+      <div id="auto-mode-status" style="font-size:11px;color:var(--text-muted);margin-bottom:6px"></div>
+      <button class="btn" id="btn-auto-settings"><span class="icon">⚙</span> Configure…</button>
+    </div>
   </aside>
 
   <!-- ── Main ── -->
@@ -529,6 +539,95 @@
     </div>
   </div>
 </div>
+
+<!-- ── Auto Mode Modal ───────────────────────────────────── -->
+<div id="automode-modal" style="
+  display:none; position:fixed; inset:0; z-index:9998;
+  background:rgba(0,0,0,.6); backdrop-filter:blur(4px);
+  align-items:center; justify-content:center;
+">
+  <div style="
+    background:var(--card); border:1px solid var(--border); border-radius:14px;
+    padding:28px 26px 22px; width:460px; max-width:95vw;
+    box-shadow:0 24px 60px rgba(0,0,0,.7);
+    display:flex; flex-direction:column; gap:14px;
+  ">
+    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:2px">⏰ Auto Mode Settings</div>
+
+    <!-- Time -->
+    <div style="display:flex;align-items:center;gap:10px">
+      <label style="width:130px;font-size:13px;color:var(--text-muted)">Start time (daily)</label>
+      <input type="time" id="auto-time" value="19:00" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 8px;font-size:13px">
+    </div>
+
+    <!-- Days -->
+    <div>
+      <label style="font-size:13px;color:var(--text-muted);display:block;margin-bottom:6px">Active days</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap" id="auto-days">
+        <label class="day-chip"><input type="checkbox" value="1" checked> Mo</label>
+        <label class="day-chip"><input type="checkbox" value="2" checked> Di</label>
+        <label class="day-chip"><input type="checkbox" value="3" checked> Mi</label>
+        <label class="day-chip"><input type="checkbox" value="4" checked> Do</label>
+        <label class="day-chip"><input type="checkbox" value="5" checked> Fr</label>
+        <label class="day-chip"><input type="checkbox" value="6"> Sa</label>
+        <label class="day-chip"><input type="checkbox" value="0"> So</label>
+      </div>
+    </div>
+
+    <!-- Models -->
+    <div style="display:flex;align-items:center;gap:10px">
+      <label style="width:130px;font-size:13px;color:var(--text-muted)">Agent LLM</label>
+      <select id="auto-agent-model" class="model-select" style="flex:1"></select>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <label style="width:130px;font-size:13px;color:var(--text-muted)">Embed model</label>
+      <select id="auto-embed-model" class="model-select" style="flex:1"></select>
+    </div>
+
+    <!-- Agent settings -->
+    <div style="border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Agent Settings</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:12px;color:var(--text-muted)">Budget (min)</label>
+          <input type="number" id="auto-budget" value="60" min="1" max="480" style="width:72px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 7px;font-size:13px">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;justify-content:flex-end;padding-bottom:2px">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-muted)" title="Scan läuft bis der Agent selbst fertig ist — kein Zeitlimit">
+            <input type="checkbox" id="auto-full-scan" style="accent-color:var(--accent);cursor:pointer">
+            Full Scan
+          </label>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:12px;color:var(--text-muted)">Focus</label>
+          <select id="auto-focus" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 7px;font-size:13px">
+            <option value="all">All strategies</option>
+            <option value="security">Security</option>
+            <option value="performance">Performance</option>
+            <option value="potential_bugs">Potential Bugs</option>
+            <option value="architecture">Architecture</option>
+            <option value="code_smell">Code Smell</option>
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <label style="font-size:12px;color:var(--text-muted)">Max calls/strategy</label>
+          <input type="number" id="auto-max-calls" value="25" min="5" max="100" style="width:72px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 7px;font-size:13px">
+        </div>
+      </div>
+    </div>
+
+    <!-- Buttons -->
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:4px">
+      <button id="btn-automode-cancel" class="btn" style="min-width:80px">Cancel</button>
+      <button id="btn-automode-save"   class="btn primary" style="min-width:100px">Save</button>
+    </div>
+  </div>
+</div>
+
+<style>
+.day-chip { display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;color:var(--text);user-select:none }
+.day-chip input { accent-color:var(--accent);cursor:pointer }
+</style>
 
 <!-- ── Confirm Modal ──────────────────────────────────────── -->
 <div id="confirm-modal" style="

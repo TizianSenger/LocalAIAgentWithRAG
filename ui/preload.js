@@ -56,6 +56,14 @@ contextBridge.exposeInMainWorld('api', {
   onAgentFinding:  (cb) => ipcRenderer.on('agent-finding',  (_, d) => cb(d)),
   onAgentDone:     (cb) => ipcRenderer.on('agent-done',     (_, d) => cb(d)),
 
+  // Auto Mode
+  getAutoMode:        ()      => ipcRenderer.invoke('auto-mode-get'),
+  saveAutoMode:       (cfg)   => ipcRenderer.send('auto-mode-save', cfg),
+  setAutoModeEnabled: (e)     => ipcRenderer.send('auto-mode-set-enabled', e),
+  onAutoModeStatus:   (cb)    => ipcRenderer.on('auto-mode-status',          (_, d) => cb(d)),
+  onAutoModeWorkflowStart: (cb) => ipcRenderer.on('auto-mode-workflow-start', () => cb()),
+  onAutoModeWorkflowDone:  (cb) => ipcRenderer.on('auto-mode-workflow-done',  (_, d) => cb(d)),
+
   // Events from main
   onOutput:       (cb) => ipcRenderer.on('process-output',   (_, d) => cb(d)),
   onStatus:       (cb) => ipcRenderer.on('process-status',   (_, d) => cb(d)),
