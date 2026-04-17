@@ -411,10 +411,12 @@ stopBtn.addEventListener('click', () => { window.api.abortChat(); setChatStreami
 // --- Model selectors ---
 const selectLlm     = document.getElementById('select-llm')
 const selectChatLlm = document.getElementById('select-chat-llm')
+const selectAgentLlm = document.getElementById('select-agent-llm')
 const selectEmbed   = document.getElementById('select-embed')
 
 const DEFAULT_LLM   = 'qwen2.5-coder:32b'
 const DEFAULT_CHAT  = 'qwen2.5-coder:32b'
+const DEFAULT_AGENT = 'qwen2.5-coder:32b'
 const DEFAULT_EMBED = 'mxbai-embed-large'
 
 // Persist settings via settings.json (via IPC)
@@ -453,11 +455,13 @@ async function refreshModels () {
     return
   }
   const s = _settings
-  populateSelect(selectLlm,     models, s.llm   || DEFAULT_LLM)
-  populateSelect(selectChatLlm, models, s.chat  || DEFAULT_CHAT)
-  populateSelect(selectEmbed,   models, s.embed || DEFAULT_EMBED)
+  populateSelect(selectLlm,      models, s.llm   || DEFAULT_LLM)
+  populateSelect(selectChatLlm,  models, s.chat  || DEFAULT_CHAT)
+  populateSelect(selectAgentLlm, models, s.agent || DEFAULT_AGENT)
+  populateSelect(selectEmbed,    models, s.embed || DEFAULT_EMBED)
   window.api.setLlmModel(selectLlm.value)
   window.api.setChatModel(selectChatLlm.value)
+  window.api.setAgentModel(selectAgentLlm.value)
   window.api.setEmbedModel(selectEmbed.value)
 }
 
@@ -469,6 +473,10 @@ selectChatLlm.addEventListener('change', () => {
   saveSettings({ chat: selectChatLlm.value })
   window.api.setChatModel(selectChatLlm.value)
 })
+selectAgentLlm.addEventListener('change', () => {
+  saveSettings({ agent: selectAgentLlm.value })
+  window.api.setAgentModel(selectAgentLlm.value)
+})
 selectEmbed.addEventListener('change', () => {
   saveSettings({ embed: selectEmbed.value })
   window.api.setEmbedModel(selectEmbed.value)
@@ -476,7 +484,6 @@ selectEmbed.addEventListener('change', () => {
 
 document.getElementById('btn-refresh-models').addEventListener('click', () => refreshModels())
 
-// --- Agent tab ---
 const agentFindings     = document.getElementById('agent-findings')
 const agentStatusBar    = document.getElementById('agent-status-bar')
 const agentStrategyLbl  = document.getElementById('agent-strategy-label')

@@ -34,6 +34,7 @@ let lastCpuInfo    = null
 let selectedLlmModel   = 'qwen2.5-coder:32b'
 let selectedChatModel  = 'qwen2.5-coder:32b'
 let selectedEmbedModel = 'mxbai-embed-large'
+let selectedAgentModel = 'qwen2.5-coder:32b'
 
 function fetchOllamaModels () {
   return new Promise(resolve => {
@@ -234,6 +235,7 @@ const pyEnv = () => ({
   OVERRIDE_LLM_MODEL:   selectedLlmModel,
   OVERRIDE_CHAT_MODEL:  selectedChatModel,
   OVERRIDE_EMBED_MODEL: selectedEmbedModel,
+  OVERRIDE_AGENT_MODEL: selectedAgentModel,
   CHAT_RAG_K: String(chatRagK),
 })
 let indexerWorkers = 1
@@ -273,7 +275,7 @@ ipcMain.on('start-agent', (_, { budgetMinutes, focus, maxCalls, grepLimit, notes
     '--grep-limit',     String(grepLimit || 50),
     '--notes-k',        String(notesK    || 8),
   ]
-  const proc = spawn(PYTHON, args, { cwd: SCRIPTS_DIR, env: pyEnv() })
+  const proc = spawn(PYTHON, args, { cwd: SCRIPTS_DIR, shell: true, env: { ...process.env, ...pyEnv() } })
   procs.agent = proc
 
   proc.stdout.on('data', raw => {
@@ -307,6 +309,7 @@ ipcMain.on('stop-agent', () => {
 ipcMain.on('set-llm-model',   (_, m) => { selectedLlmModel   = m; log('system', `Indexer LLM set to: ${m}`, 'info') })
 ipcMain.on('set-chat-model',  (_, m) => { selectedChatModel  = m; log('system', `Chat LLM set to: ${m}`, 'info') })
 ipcMain.on('set-embed-model', (_, m) => { selectedEmbedModel = m; log('system', `Embed model set to: ${m}`, 'info') })
+ipcMain.on('set-agent-model', (_, m) => { selectedAgentModel = m; log('system', `Agent LLM set to: ${m}`, 'info') })
 ipcMain.handle('get-models',    async () => fetchOllamaModels())
 ipcMain.handle('get-settings',  async () => readSettings())
 ipcMain.on('save-settings', (_, patch) => {

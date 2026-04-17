@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('api', {
   setLlmModel:    (m) => ipcRenderer.send('set-llm-model', m),
   setChatModel:   (m) => ipcRenderer.send('set-chat-model', m),
   setEmbedModel:  (m) => ipcRenderer.send('set-embed-model', m),
+  setAgentModel:  (m) => ipcRenderer.send('set-agent-model', m),
   // Settings
   getSettings:    ()      => ipcRenderer.invoke('get-settings'),
   saveSettings:   (patch) => ipcRenderer.send('save-settings', patch),

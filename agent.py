@@ -30,13 +30,13 @@ from datetime import datetime
 from pathlib import Path
 
 from langchain_ollama.llms import OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from config import REPO_PATH, VAULT_PATH, LLM_MODEL, SKIP_DIRS, CODE_EXTENSIONS
 from dep_graph import load_graph, get_dependents, get_class_info
 
 # ── Allow UI to override model ────────────────────────────────────────────────
-LLM_MODEL = os.environ.get('OVERRIDE_LLM_MODEL', LLM_MODEL)
+LLM_MODEL = os.environ.get('OVERRIDE_AGENT_MODEL', os.environ.get('OVERRIDE_LLM_MODEL', LLM_MODEL))
 
 # ── Report output path ────────────────────────────────────────────────────────
 REPORT_DIR = os.path.join(VAULT_PATH, 'AgentReports')
@@ -210,7 +210,7 @@ Start by searching for relevant code.
 """
 
 _TOOL_CALL_RE = re.compile(
-    r'(SEARCH_NOTES|GREP|READ_FILE|GET_DEPENDENTS|GET_CLASS_INFO|WRITE_FINDING)\((.+?)\)(?:\n|$)',
+    r'(SEARCH_NOTES|GREP|READ_FILE|GET_DEPENDENTS|GET_CLASS_INFO|WRITE_FINDING)\((.+?)\)',
     re.DOTALL
 )
 
@@ -222,8 +222,12 @@ def _parse_tool_call(text: str):
         return None, None
     name = m.group(1)
     raw  = m.group(2).strip()
-    # Split on comma+space but not inside strings — simple heuristic
-    args = [a.strip().strip('"\'') for a in raw.split(',')]
+    # WRITE_FINDING has 4 args; split on first 3 commas only, rest is description
+    if name == 'WRITE_FINDING':
+        parts = raw.split(',', 3)
+    else:
+        parts = raw.split(',', 1)  # GREP has 2 args, others have 1
+    args = [a.strip().strip('"\'') for a in parts]
     return name, args
 
 
@@ -270,16 +274,17 @@ class Finding:
 
 def run_strategy(strategy: str, model, findings: list, budget_seconds: float, start_time: float) -> int:
     """Run one analysis strategy. Returns number of tool calls made."""
-    desc     = STRATEGY_DESCRIPTIONS[strategy]
-    messages = [('system', _AGENT_SYSTEM.format(
+    desc       = STRATEGY_DESCRIPTIONS[strategy]
+    system_msg = SystemMessage(content=_AGENT_SYSTEM.format(
         category=strategy,
         category_desc=desc,
         tools=TOOLS_DESCRIPTION,
-    ))]
+    ))
 
     tool_calls   = 0
+    min_calls    = 5   # must make at least this many tool calls before DONE is accepted
     max_calls    = _SETTINGS.get('max_calls', 25)   # cap per strategy
-    conversation = []   # (role, content) pairs
+    conversation = []   # list of HumanMessage / AIMessage
 
     print(f'\n[agent] === Strategy: {strategy.upper()} ===', flush=True)
     _emit_progress(strategy=strategy, tool_calls=0, findings=len(findings))
@@ -290,30 +295,34 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
             print(f'[agent] Time budget exhausted during {strategy}', flush=True)
             break
 
-        # Build prompt
-        prompt_messages = messages + conversation
+        # Build message list directly — avoids ChatPromptTemplate interpreting
+        # { } in tool results as template variables
+        prompt_messages = [system_msg] + conversation
         try:
-            prompt = ChatPromptTemplate.from_messages(prompt_messages)
-            response = (prompt | model).invoke({})
+            response = model.invoke(prompt_messages)
         except Exception as e:
             print(f'[agent] LLM error: {e}', flush=True)
             break
 
         response_text = str(response).strip()
-        conversation.append(('assistant', response_text))
+        conversation.append(AIMessage(content=response_text))
 
-        print(f'[agent] LLM: {response_text[:200]}', flush=True)
+        print(f'[agent] LLM ({tool_calls+1}/{max_calls}): {response_text[:300]}', flush=True)
 
         # Done?
         if 'DONE' in response_text and not _TOOL_CALL_RE.search(response_text):
-            print(f'[agent] Strategy {strategy} complete.', flush=True)
-            break
+            if tool_calls >= min_calls:
+                print(f'[agent] Strategy {strategy} complete.', flush=True)
+                break
+            else:
+                conversation.append(HumanMessage(content=f'You said DONE too early. You must make at least {min_calls} tool calls first. Please continue investigating.'))
+                continue
 
         # Parse tool call
         tool_name, tool_args = _parse_tool_call(response_text)
         if not tool_name:
             # No valid tool call — prompt again
-            conversation.append(('human', 'Please call exactly one tool from the list, or say DONE if finished.'))
+            conversation.append(HumanMessage(content='Please call exactly one tool from the list, or say DONE if finished.'))
             continue
 
         tool_calls += 1
@@ -328,14 +337,14 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
             findings.append(f)
             print(f'AGENT_FINDING:{json.dumps(f.to_dict())}', flush=True)
             _emit_progress(strategy=strategy, tool_calls=tool_calls, findings=len(findings))
-            conversation.append(('human', f'Finding recorded: [{f.severity}] {f.description}'))
+            conversation.append(HumanMessage(content=f'Finding recorded: [{f.severity}] {f.description}'))
         else:
             print(f'[agent] Tool call: {tool_name}({", ".join(tool_args[:2])})', flush=True)
             result = _run_tool(tool_name, tool_args)
             # Truncate very long results
             if len(result) > 3000:
                 result = result[:3000] + '\n... (truncated)'
-            conversation.append(('human', f'Tool result:\n{result}'))
+            conversation.append(HumanMessage(content=f'Tool result:\n{result}'))
             _emit_progress(strategy=strategy, tool_calls=tool_calls, findings=len(findings))
 
     return tool_calls
