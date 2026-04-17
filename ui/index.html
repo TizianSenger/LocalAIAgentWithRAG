@@ -478,6 +478,10 @@
           <label>Budget (min)</label>
           <input type="number" id="agent-budget" value="60" min="5" max="360" style="width:64px">
         </div>
+        <div class="agent-config" style="gap:5px">
+          <input type="checkbox" id="agent-full-scan" style="width:14px;height:14px;cursor:pointer;accent-color:var(--accent)">
+          <label for="agent-full-scan" style="cursor:pointer" title="Scan until the agent has checked the entire codebase — no time limit">Full Scan</label>
+        </div>
         <div class="agent-config">
           <label>Focus</label>
           <select id="agent-focus">
@@ -514,6 +518,10 @@
         <span id="agent-strategy-label" style="color:var(--accent);font-weight:700"></span>
         <span id="agent-tool-calls"></span>
         <span id="agent-findings-count" style="color:var(--success)"></span>
+        <span style="margin-left:auto;display:flex;gap:10px;font-variant-numeric:tabular-nums">
+          <span id="agent-elapsed" style="color:var(--text-muted)"></span>
+          <span id="agent-remaining" style="color:var(--accent)"></span>
+        </span>
       </div>
       <div class="agent-findings" id="agent-findings">
         <div style="color:var(--text-muted);font-size:13px;text-align:center;margin-top:40px">Start the agent to begin analysis. Findings will appear here in real time.</div>

@@ -26,6 +26,7 @@ import re
 import time
 import argparse
 import textwrap
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -281,10 +282,14 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
         tools=TOOLS_DESCRIPTION,
     ))
 
-    tool_calls   = 0
-    min_calls    = 5   # must make at least this many tool calls before DONE is accepted
-    max_calls    = _SETTINGS.get('max_calls', 25)   # cap per strategy
-    conversation = []   # list of HumanMessage / AIMessage
+    tool_calls        = 0
+    min_calls         = 3   # must make at least this many tool calls before DONE is accepted
+    max_calls         = _SETTINGS.get('max_calls', 25)   # cap per strategy
+    conversation      = []   # list of HumanMessage / AIMessage
+    findings_at_start = len(findings)
+    consecutive_done  = 0
+    last_tool_sig     = None   # (tool_name, first_arg) — repeat detection
+    repeat_count      = 0
 
     print(f'\n[agent] === Strategy: {strategy.upper()} ===', flush=True)
     _emit_progress(strategy=strategy, tool_calls=0, findings=len(findings))
@@ -311,12 +316,16 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
 
         # Done?
         if 'DONE' in response_text and not _TOOL_CALL_RE.search(response_text):
-            if tool_calls >= min_calls:
+            consecutive_done += 1
+            new_findings = len(findings) - findings_at_start
+            # Accept DONE if: enough tool calls, OR found something, OR stuck in DONE loop
+            if tool_calls >= min_calls or new_findings > 0 or consecutive_done >= 2:
                 print(f'[agent] Strategy {strategy} complete.', flush=True)
                 break
             else:
                 conversation.append(HumanMessage(content=f'You said DONE too early. You must make at least {min_calls} tool calls first. Please continue investigating.'))
                 continue
+        consecutive_done = 0
 
         # Parse tool call
         tool_name, tool_args = _parse_tool_call(response_text)
@@ -326,6 +335,23 @@ def run_strategy(strategy: str, model, findings: list, budget_seconds: float, st
             continue
 
         tool_calls += 1
+
+        # Detect repeated identical tool calls
+        tool_sig = (tool_name, tool_args[0] if tool_args else '')
+        if tool_sig == last_tool_sig:
+            repeat_count += 1
+        else:
+            repeat_count = 0
+        last_tool_sig = tool_sig
+
+        if repeat_count >= 2:
+            print(f'[agent] Repeat loop: {tool_name} x{repeat_count+1} — redirecting', flush=True)
+            conversation.append(HumanMessage(content=f'You already called {tool_name} with the same arguments {repeat_count+1} times and got the same result. Do NOT repeat it. Call a DIFFERENT tool (GREP, READ_FILE, LIST_FILES) or say DONE.'))
+            tool_calls -= 1   # don\'t waste a call slot on repeats
+            if repeat_count >= 4:
+                print(f'[agent] Strategy {strategy} aborted — stuck in repeat loop.', flush=True)
+                break
+            continue
 
         if tool_name == 'WRITE_FINDING':
             # Parse finding args
@@ -443,13 +469,14 @@ def main():
     _SETTINGS['grep_limit'] = args.grep_limit
     _SETTINGS['notes_k']    = args.notes_k
 
-    budget_seconds = args.budget_minutes * 60
+    budget_seconds = args.budget_minutes * 60 if args.budget_minutes > 0 else float('inf')
+    _no_budget = args.budget_minutes == 0
     focus = [s.strip() for s in args.focus.split(',')] if args.focus != 'all' else STRATEGIES
     focus = [s for s in focus if s in STRATEGIES]
     if not focus:
         focus = STRATEGIES
 
-    print(f'[agent] Starting — budget: {args.budget_minutes} min, strategies: {focus}', flush=True)
+    print(f'[agent] Starting — budget: {"unlimited (full scan)" if args.budget_minutes == 0 else str(args.budget_minutes) + " min"}, strategies: {focus}', flush=True)
     print(f'[agent] Settings — max_calls: {args.max_calls}, grep_limit: {args.grep_limit}, notes_k: {args.notes_k}', flush=True)
     print(f'[agent] Model: {LLM_MODEL}', flush=True)
     _emit_progress(strategy='init', tool_calls=0, findings=0)
@@ -478,6 +505,20 @@ def main():
 
     print(f'[agent] Report saved to: {report_path}', flush=True)
     print(f'AGENT_DONE:{json.dumps({"findings": len(findings), "report_path": report_path, "elapsed_min": round(elapsed/60, 1)})}', flush=True)
+
+    # Unload model from VRAM immediately (Ollama keep_alive=0)
+    try:
+        payload = json.dumps({'model': LLM_MODEL, 'keep_alive': 0}).encode()
+        req = urllib.request.Request(
+            'http://localhost:11434/api/generate',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        urllib.request.urlopen(req, timeout=5)
+        print(f'[agent] Model unloaded from VRAM.', flush=True)
+    except Exception as e:
+        print(f'[agent] VRAM unload skipped: {e}', flush=True)
 
 
 if __name__ == '__main__':

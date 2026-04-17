@@ -494,6 +494,40 @@ const btnAgentStart     = document.getElementById('btn-agent-start')
 const btnAgentStop      = document.getElementById('btn-agent-stop')
 
 let agentRunning = false
+let _agentStartTime  = null
+let _agentBudgetMs   = 0
+let _agentTimerID    = null
+const agentElapsedLbl   = document.getElementById('agent-elapsed')
+const agentRemainingLbl = document.getElementById('agent-remaining')
+
+// Full-scan checkbox disables the budget input
+const agentFullScan   = document.getElementById('agent-full-scan')
+const agentBudgetInput = document.getElementById('agent-budget')
+agentFullScan.addEventListener('change', () => {
+  agentBudgetInput.disabled = agentFullScan.checked
+  agentBudgetInput.style.opacity = agentFullScan.checked ? '0.35' : '1'
+})
+
+function _fmtTime (ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(totalSec / 60)
+  const s = String(totalSec % 60).padStart(2, '0')
+  return `${m}:${s}`
+}
+
+function _tickAgentTimer () {
+  if (!_agentStartTime) return
+  const elapsed   = Date.now() - _agentStartTime
+  agentElapsedLbl.textContent = `⏱ ${_fmtTime(elapsed)}`
+  if (_agentBudgetMs === 0) {
+    // Full scan — no limit, only show elapsed
+    agentRemainingLbl.textContent = ''
+  } else {
+    const remaining = _agentBudgetMs - elapsed
+    agentRemainingLbl.textContent = remaining > 0 ? `⏳ ${_fmtTime(remaining)}` : '⌛ overtime'
+    agentRemainingLbl.style.color = remaining < 60000 ? 'var(--danger)' : 'var(--accent)'
+  }
+}
 
 function setAgentRunning (running) {
   agentRunning = running
@@ -508,6 +542,14 @@ function setAgentRunning (running) {
   sideStop.style.display   = running ? 'block' : 'none'
   // Status dot
   setDot('agent', running ? 'running' : 'stopped')
+  // Timer
+  if (!running) {
+    clearInterval(_agentTimerID)
+    _agentTimerID  = null
+    _agentStartTime = null
+    agentElapsedLbl.textContent   = ''
+    agentRemainingLbl.textContent = ''
+  }
 }
 
 function addFindingCard (f) {
@@ -539,7 +581,8 @@ document.getElementById('btn-agent-advanced').addEventListener('click', function
 
 function startAgent () {
   if (agentRunning) return
-  const budget    = parseInt(document.getElementById('agent-budget').value,     10) || 60
+  const fullScan  = document.getElementById('agent-full-scan').checked
+  const budget    = fullScan ? 0 : (parseInt(document.getElementById('agent-budget').value, 10) || 60)
   const focus     = document.getElementById('agent-focus').value
   const maxCalls  = parseInt(document.getElementById('agent-max-calls').value,  10) || 25
   const grepLimit = parseInt(document.getElementById('agent-grep-limit').value, 10) || 50
@@ -549,7 +592,12 @@ function startAgent () {
   agentFindings.innerHTML = '<div style="color:var(--text-muted);font-size:13px;text-align:center;margin-top:40px">Agent is running… findings will appear here.</div>'
   agentStatusText.textContent = 'Starting…'
   setAgentRunning(true)
-  appendLog({ source: 'agent', text: `Agent started — budget: ${budget} min, focus: ${focus}, max_calls: ${maxCalls}, grep: ${grepLimit}, k: ${notesK}`, type: 'info', ts: timestamp() })
+  // Start timer
+  _agentStartTime = Date.now()
+  _agentBudgetMs  = budget * 60 * 1000   // 0 when full scan = no limit
+  _tickAgentTimer()
+  _agentTimerID = setInterval(_tickAgentTimer, 1000)
+  appendLog({ source: 'agent', text: `Agent started — budget: ${fullScan ? 'unlimited (full scan)' : budget + ' min'}, focus: ${focus}, max_calls: ${maxCalls}, grep: ${grepLimit}, k: ${notesK}`, type: 'info', ts: timestamp() })
 
   window.api.startAgent({ budgetMinutes: budget, focus, maxCalls, grepLimit, notesK })
 }
