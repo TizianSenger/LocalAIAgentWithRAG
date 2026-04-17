@@ -18,6 +18,7 @@ function writeSettings (data) {
 const SCRIPTS_DIR  = path.resolve(__dirname, '..')
 const VAULT_CODE   = 'C:\\natMSSObsidian\\natMSS\\Code'
 const STATE_FILE   = 'C:\\natMSSObsidian\\natMSS\\.indexer_state.json'
+const CHROMA_DIR   = path.join(SCRIPTS_DIR, 'chrome_langchain_db')
 const PYTHON       = 'C:\\Users\\Sim2\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
 const CHAT_PORT    = 5001
 
@@ -346,6 +347,12 @@ ipcMain.on('clear-vault', async () => {
     if (fs.existsSync(STATE_FILE)) {
       fs.rmSync(STATE_FILE)
       log('system', `[clear] Deleted ${STATE_FILE}`, 'info')
+      cleared++
+    }
+    // Also wipe the ChromaDB cache so chat API re-embeds on next start
+    if (fs.existsSync(CHROMA_DIR)) {
+      fs.rmSync(CHROMA_DIR, { recursive: true, force: true })
+      log('system', `[clear] Deleted ChromaDB cache ${CHROMA_DIR}`, 'info')
       cleared++
     }
     log('system', `[clear] Vault cleared (${cleared} items removed)`, 'info')
