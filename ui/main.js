@@ -224,12 +224,16 @@ ipcMain.on('stop-ollama', () => {
 })
 
 // Indexer
+let chatRagK = 20
+ipcMain.on('set-chat-rag-k', (_, k) => { chatRagK = parseInt(k, 10) || 20 })
+
 const pyEnv = () => ({
-  PYTHONUNBUFFERED: '1',
-  PYTHONIOENCODING: 'utf-8',
+  PYTHONUNBUFFERED:  '1',
+  PYTHONIOENCODING:  'utf-8',
   OVERRIDE_LLM_MODEL:   selectedLlmModel,
   OVERRIDE_CHAT_MODEL:  selectedChatModel,
   OVERRIDE_EMBED_MODEL: selectedEmbedModel,
+  CHAT_RAG_K: String(chatRagK),
 })
 let indexerWorkers = 1
 ipcMain.on('start-indexer',       () => spawnTracked('indexer', PYTHON, ['-u', 'indexer.py', '--workers', String(indexerWorkers)],              { env: pyEnv() }))
@@ -257,6 +261,46 @@ ipcMain.on('start-chat-api', () => {
   })
 })
 ipcMain.on('stop-chat-api',  () => killProc('chatApi'))
+
+// Agent
+ipcMain.on('start-agent', (_, { budgetMinutes, focus, maxCalls, grepLimit, notesK }) => {
+  const args = [
+    '-u', '-B', path.join(SCRIPTS_DIR, 'agent.py'),
+    '--budget-minutes', String(budgetMinutes || 60),
+    '--focus',          focus || 'all',
+    '--max-calls',      String(maxCalls  || 25),
+    '--grep-limit',     String(grepLimit || 50),
+    '--notes-k',        String(notesK    || 8),
+  ]
+  const proc = spawn(PYTHON, args, { cwd: SCRIPTS_DIR, env: pyEnv() })
+  procs.agent = proc
+
+  proc.stdout.on('data', raw => {
+    raw.toString('utf8').split('\n').forEach(line => {
+      if (!line.trim()) return
+      if (line.startsWith('AGENT_PROGRESS:')) {
+        try { mainWindow.webContents.send('agent-progress', JSON.parse(line.slice(15))) } catch {}
+      } else if (line.startsWith('AGENT_FINDING:')) {
+        try { mainWindow.webContents.send('agent-finding', JSON.parse(line.slice(14))) } catch {}
+      } else if (line.startsWith('AGENT_DONE:')) {
+        try { mainWindow.webContents.send('agent-done', JSON.parse(line.slice(11))) } catch {}
+      } else {
+        mainWindow.webContents.send('process-output', { source: 'agent', text: line, type: 'stdout' })
+      }
+    })
+  })
+  proc.stderr.on('data', raw => {
+    mainWindow.webContents.send('process-output', { source: 'agent', text: raw.toString(), type: 'stderr' })
+  })
+  proc.on('close', code => {
+    procs.agent = null
+    mainWindow.webContents.send('process-status', { source: 'agent', status: code === 0 ? 'stopped' : 'error' })
+  })
+  mainWindow.webContents.send('process-status', { source: 'agent', status: 'running' })
+})
+ipcMain.on('stop-agent', () => {
+  if (procs.agent) { procs.agent.kill(); procs.agent = null }
+})
 
 // Model selection
 ipcMain.on('set-llm-model',   (_, m) => { selectedLlmModel   = m; log('system', `Indexer LLM set to: ${m}`, 'info') })
@@ -291,15 +335,7 @@ ipcMain.on('stop-all', () => killAll())
 
 // Clear vault
 ipcMain.on('clear-vault', async () => {
-  const { response } = await dialog.showMessageBox(mainWindow, {
-    type: 'warning',
-    buttons: ['Cancel', 'Clear'],
-    defaultId: 0,
-    title: 'Clear Vault',
-    message: 'This will delete all generated notes and the index state.\nAre you sure?',
-  })
-  if (response !== 1) return
-
+  // Confirmation is handled in-app (custom modal in renderer)
   let cleared = 0
   try {
     if (fs.existsSync(VAULT_CODE)) {

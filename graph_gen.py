@@ -25,7 +25,7 @@ def parse_vault(vault_dir):
                     content = f.read()
             except Exception:
                 content = ''
-            key = filename.lower()
+            key = os.path.relpath(file_path, vault_dir).lower().replace('\\', '/')
             notes[key] = content
             for match in re.finditer(r'\[\[([^\]|#]+)', content):
                 link = match.group(1).strip().lower()

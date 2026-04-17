@@ -183,14 +183,35 @@ window.api.onOutput(({ source, text, type }) => {
   appendLog({ source, text, type, ts: timestamp() })
 })
 
+// Map: process source → sidebar stop-button id
+const _stopBtnMap = {
+  ollama:  'btn-stop-ollama',
+  indexer: 'btn-stop-indexer',
+  update:  'btn-stop-update',
+  chatApi: 'btn-stop-chat',
+  agent:   'btn-stop-agent',
+}
+
 window.api.onStatus(({ source, status }) => {
   setDot(source, status)
+  const running = status === 'running'
+
+  // Show/hide the corresponding sidebar stop button
+  const stopId = _stopBtnMap[source]
+  if (stopId) {
+    const btn = document.getElementById(stopId)
+    if (btn) btn.style.display = running ? 'block' : 'none'
+  }
+
   if (source === 'indexer') {
-    if (status === 'running') {
+    if (running) {
       setChatTabLocked(true)
     } else {
       setTimeout(() => banner.classList.remove('visible'), 3000)
     }
+  }
+  if (source === 'agent') {
+    document.getElementById('btn-start-agent').disabled = running
   }
 })
 
@@ -227,7 +248,41 @@ document.getElementById('btn-stop-update').addEventListener('click',  () => wind
 document.getElementById('btn-start-chat').addEventListener('click', () => window.api.startChatApi())
 document.getElementById('btn-stop-chat').addEventListener('click',  () => window.api.stopChatApi())
 
-document.getElementById('btn-clear-vault').addEventListener('click', () => window.api.clearVault())
+;(function () {
+  const modal       = document.getElementById('confirm-modal')
+  const titleEl     = document.getElementById('confirm-title')
+  const bodyEl      = document.getElementById('confirm-body')
+  const cancelBtn   = document.getElementById('confirm-cancel')
+  const okBtn       = document.getElementById('confirm-ok')
+
+  function openConfirm ({ title, body, okLabel = 'Confirm' }, onOk) {
+    titleEl.textContent = title
+    bodyEl.textContent  = body
+    okBtn.textContent   = okLabel
+    modal.style.display = 'flex'
+    const cleanup = () => { modal.style.display = 'none'; cancelBtn.onclick = null; okBtn.onclick = null }
+    cancelBtn.onclick = cleanup
+    okBtn.onclick     = () => { cleanup(); onOk() }
+  }
+
+  // Close on backdrop click
+  modal.addEventListener('click', e => { if (e.target === modal) { modal.style.display = 'none' } })
+
+  document.getElementById('btn-clear-vault').addEventListener('click', () => {
+    openConfirm({
+      title:   'Clear Vault?',
+      body:    'This will permanently delete all generated notes and the index state. This action cannot be undone.',
+      okLabel: '🗑 Clear Vault',
+    }, () => window.api.clearVault())
+  })
+}())
+
+// --- Agent sidebar buttons (mirror tab buttons) ---
+document.getElementById('btn-start-agent').addEventListener('click', () => {
+  document.querySelector('[data-tab="agent"]').click()
+  startAgent()
+})
+document.getElementById('btn-stop-agent').addEventListener('click', () => window.api.stopAgent())
 
 // --- Graph tab ---
 const graphFrame  = document.getElementById('graph-frame')
@@ -260,6 +315,12 @@ const chatMessages = document.getElementById('chat-messages')
 const chatInput    = document.getElementById('chat-input')
 const sendBtn      = document.getElementById('btn-send')
 const stopBtn      = document.getElementById('btn-stop-chat')
+const chatRagKInput = document.getElementById('chat-rag-k')
+
+// Sync k value to main process whenever it changes
+chatRagKInput.addEventListener('change', () => {
+  window.api.setChatRagK(chatRagKInput.value)
+})
 
 function setChatStreaming (streaming) {
   sendBtn.disabled    = streaming
@@ -414,6 +475,109 @@ selectEmbed.addEventListener('change', () => {
 })
 
 document.getElementById('btn-refresh-models').addEventListener('click', () => refreshModels())
+
+// --- Agent tab ---
+const agentFindings     = document.getElementById('agent-findings')
+const agentStatusBar    = document.getElementById('agent-status-bar')
+const agentStrategyLbl  = document.getElementById('agent-strategy-label')
+const agentToolCallsLbl = document.getElementById('agent-tool-calls')
+const agentFindingsLbl  = document.getElementById('agent-findings-count')
+const agentStatusText   = document.getElementById('agent-status-text')
+const btnAgentStart     = document.getElementById('btn-agent-start')
+const btnAgentStop      = document.getElementById('btn-agent-stop')
+
+let agentRunning = false
+
+function setAgentRunning (running) {
+  agentRunning = running
+  // Agent-tab toolbar buttons
+  btnAgentStart.style.display = running ? 'none'        : 'inline-flex'
+  btnAgentStop.style.display  = running ? 'inline-flex' : 'none'
+  agentStatusBar.classList.toggle('visible', running)
+  // Sidebar buttons
+  const sideStart = document.getElementById('btn-start-agent')
+  const sideStop  = document.getElementById('btn-stop-agent')
+  sideStart.disabled       = running
+  sideStop.style.display   = running ? 'block' : 'none'
+  // Status dot
+  setDot('agent', running ? 'running' : 'stopped')
+}
+
+function addFindingCard (f) {
+  // Remove placeholder text on first finding
+  const placeholder = agentFindings.querySelector('div[style]')
+  if (placeholder) placeholder.remove()
+
+  const card = document.createElement('div')
+  card.className = `finding-card ${f.severity}`
+  card.innerHTML = `
+    <div class="finding-header">
+      <span class="finding-sev ${f.severity}">${f.severity}</span>
+      <span class="finding-cat">${f.category}</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">${f.ts || ''}</span>
+    </div>
+    <div class="finding-file">${f.file}</div>
+    <div class="finding-desc">${f.description}</div>
+  `
+  agentFindings.appendChild(card)
+  agentFindings.scrollTop = agentFindings.scrollHeight
+}
+
+// Toggle Advanced row
+document.getElementById('btn-agent-advanced').addEventListener('click', function () {
+  const row = document.getElementById('agent-advanced-row')
+  const open = row.classList.toggle('open')
+  this.textContent = open ? '⚙ Advanced ▾' : '⚙ Advanced ▸'
+})
+
+function startAgent () {
+  if (agentRunning) return
+  const budget    = parseInt(document.getElementById('agent-budget').value,     10) || 60
+  const focus     = document.getElementById('agent-focus').value
+  const maxCalls  = parseInt(document.getElementById('agent-max-calls').value,  10) || 25
+  const grepLimit = parseInt(document.getElementById('agent-grep-limit').value, 10) || 50
+  const notesK    = parseInt(document.getElementById('agent-notes-k').value,    10) || 8
+
+  // Clear previous findings
+  agentFindings.innerHTML = '<div style="color:var(--text-muted);font-size:13px;text-align:center;margin-top:40px">Agent is running… findings will appear here.</div>'
+  agentStatusText.textContent = 'Starting…'
+  setAgentRunning(true)
+  appendLog({ source: 'agent', text: `Agent started — budget: ${budget} min, focus: ${focus}, max_calls: ${maxCalls}, grep: ${grepLimit}, k: ${notesK}`, type: 'info', ts: timestamp() })
+
+  window.api.startAgent({ budgetMinutes: budget, focus, maxCalls, grepLimit, notesK })
+}
+
+btnAgentStart.addEventListener('click', startAgent)
+btnAgentStop.addEventListener('click', () => {
+  window.api.stopAgent()
+  setAgentRunning(false)
+  agentStatusText.textContent = 'Stopped by user.'
+})
+
+window.api.onAgentProgress(({ strategy, tool_calls, findings }) => {
+  agentStrategyLbl.textContent  = `Strategy: ${strategy}`
+  agentToolCallsLbl.textContent = `Tool calls: ${tool_calls}`
+  agentFindingsLbl.textContent  = `Findings: ${findings}`
+  agentStatusText.textContent   = `${strategy} — ${tool_calls} calls`
+})
+
+window.api.onAgentFinding((f) => {
+  addFindingCard(f)
+  appendLog({ source: 'agent', text: `[${f.severity}] ${f.file}: ${f.description}`, type: 'stdout', ts: timestamp() })
+})
+
+window.api.onAgentDone(({ findings, report_path, elapsed_min }) => {
+  setAgentRunning(false)
+  agentStatusText.textContent = `Done — ${findings} findings in ${elapsed_min} min`
+  appendLog({ source: 'agent', text: `Analysis complete: ${findings} findings. Report: ${report_path}`, type: 'info', ts: timestamp() })
+
+  // Show summary banner in findings panel
+  const banner = document.createElement('div')
+  banner.style.cssText = 'background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:12px 14px;margin-top:10px;font-size:13px;color:var(--success)'
+  banner.innerHTML = `✅ Analysis complete &mdash; <b>${findings}</b> findings in <b>${elapsed_min} min</b><br><span style="font-size:11px;color:var(--text-muted)">${report_path}</span>`
+  agentFindings.appendChild(banner)
+  agentFindings.scrollTop = agentFindings.scrollHeight
+})
 
 // --- Init ---
 window.api.requestStatus()

@@ -236,6 +236,37 @@
   .chat-stop-btn { background: #ef4444; border: none; border-radius: 8px; color: #fff; padding: 10px 18px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s; }
   .chat-stop-btn:hover { background: #dc2626; }
 
+  /* ── Agent panel ──────────────────────────────────────────── */
+  .agent-toolbar { display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--sidebar-bg); border-bottom:1px solid var(--border); flex-shrink:0; flex-wrap:wrap; }
+  .agent-config  { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-muted); }
+  .agent-config label { white-space:nowrap; }
+  .agent-config input[type=number], .agent-config select {
+    background:var(--card); border:1px solid var(--border); border-radius:4px;
+    color:var(--text); padding:4px 6px; font-size:12px;
+  }
+  /* Advanced collapsible */
+  .agent-advanced-toggle { background:none; border:none; color:var(--text-muted); font-size:12px; cursor:pointer; padding:2px 6px; border-radius:4px; }
+  .agent-advanced-toggle:hover { color:var(--text); background:rgba(255,255,255,.06); }
+  .agent-advanced-row { display:none; width:100%; padding:8px 14px; gap:16px; align-items:center; background:rgba(0,0,0,.15); border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .agent-advanced-row.open { display:flex; }
+  .agent-status-bar { padding:8px 14px; background:rgba(99,102,241,.06); border-bottom:1px solid var(--border); font-size:12px; color:var(--text-muted); flex-shrink:0; display:none; }
+  .agent-status-bar.visible { display:flex; align-items:center; gap:12px; }
+  .agent-findings { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  .finding-card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+  .finding-card.CRITICAL { border-left:4px solid #ef4444; }
+  .finding-card.HIGH     { border-left:4px solid #f97316; }
+  .finding-card.MEDIUM   { border-left:4px solid #f59e0b; }
+  .finding-card.LOW      { border-left:4px solid #6366f1; }
+  .finding-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .finding-sev  { font-size:10px; font-weight:700; padding:2px 7px; border-radius:10px; }
+  .finding-sev.CRITICAL { background:rgba(239,68,68,.2);  color:#fca5a5; }
+  .finding-sev.HIGH     { background:rgba(249,115,22,.2); color:#fdba74; }
+  .finding-sev.MEDIUM   { background:rgba(245,158,11,.2); color:#fcd34d; }
+  .finding-sev.LOW      { background:rgba(99,102,241,.2); color:#a5b4fc; }
+  .finding-cat  { font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; }
+  .finding-file { font-size:11px; font-family:var(--font-mono); color:var(--info); margin-bottom:4px; }
+  .finding-desc { font-size:13px; color:var(--text); line-height:1.5; }
+
   /* ── Scrollbar ────────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -323,6 +354,7 @@
       <div class="status-row"><span>Indexer</span> <span class="status-dot" id="status-indexer"></span></div>
       <div class="status-row"><span>Update</span>  <span class="status-dot" id="status-update"></span></div>
       <div class="status-row"><span>Chat API</span><span class="status-dot" id="status-chatApi"></span></div>
+      <div class="status-row"><span>Agent</span>   <span class="status-dot" id="status-agent"></span></div>
     </div>
 
     <!-- Model selectors -->
@@ -352,7 +384,7 @@
         <input type="number" id="workers-input" value="1" min="1" max="16">
       </div>
       <button class="btn primary" id="btn-start-ollama"><span class="icon">▶</span> Start Ollama</button>
-      <button class="btn stop"    id="btn-stop-ollama"> <span class="icon">■</span> Stop Ollama</button>
+      <button class="btn stop"    id="btn-stop-ollama"  style="display:none"> <span class="icon">■</span> Stop Ollama</button>
       <button class="btn danger"  id="btn-stop-all">    <span class="icon">⏹</span> Stop All Processes</button>
     </div>
 
@@ -360,24 +392,30 @@
       <h3>Indexer</h3>
       <button class="btn"  id="btn-start-indexer"><span class="icon">⚡</span> Start Indexer</button>
       <button class="btn"  id="btn-force-indexer"><span class="icon">🔄</span> Force Re-Index</button>
-      <button class="btn stop" id="btn-stop-indexer"><span class="icon">■</span> Stop Indexer</button>
+      <button class="btn stop" id="btn-stop-indexer" style="display:none"><span class="icon">■</span> Stop Indexer</button>
     </div>
 
     <div class="btn-group">
       <h3>Update</h3>
       <button class="btn"  id="btn-start-update"><span class="icon">↓</span> Git Pull + Update</button>
-      <button class="btn stop" id="btn-stop-update"><span class="icon">■</span> Stop Update</button>
+      <button class="btn stop" id="btn-stop-update" style="display:none"><span class="icon">■</span> Stop Update</button>
     </div>
 
     <div class="btn-group">
       <h3>Chat</h3>
       <button class="btn"  id="btn-start-chat"><span class="icon">💬</span> Start Chat API</button>
-      <button class="btn stop" id="btn-stop-chat"><span class="icon">■</span> Stop Chat API</button>
+      <button class="btn stop" id="btn-stop-chat" style="display:none"><span class="icon">■</span> Stop Chat API</button>
     </div>
 
     <div class="btn-group">
       <h3>Vault</h3>
       <button class="btn warning" id="btn-clear-vault"><span class="icon">🗑</span> Clear Vault</button>
+    </div>
+
+    <div class="btn-group">
+      <h3>Agent</h3>
+      <button class="btn primary" id="btn-start-agent"><span class="icon">🤖</span> Start Analysis</button>
+      <button class="btn stop"    id="btn-stop-agent"  style="display:none"> <span class="icon">■</span> Stop Agent</button>
     </div>
   </aside>
 
@@ -387,6 +425,7 @@
       <button class="tab-btn active" data-tab="logs">Logs</button>
       <button class="tab-btn" data-tab="chat" id="tab-btn-chat" disabled title="Chat ist gesperrt während der Indexer läuft">Chat 🔒</button>
       <button class="tab-btn"        data-tab="graph">&#128279; Graph</button>
+      <button class="tab-btn"        data-tab="agent">🤖 Agent</button>
     </div>
 
     <!-- Logs tab -->
@@ -411,6 +450,7 @@
       <div class="chat-messages" id="chat-messages"></div>
       <div class="chat-input-row">
         <input type="text" id="chat-input" placeholder="Ask about the code…" autocomplete="off">
+        <label style="font-size:11px;color:var(--text-muted);white-space:nowrap;margin-left:6px" title="Number of chunks retrieved (restart Chat API to apply)">k=<input type="number" id="chat-rag-k" value="20" min="1" max="50" style="width:44px;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 5px;font-size:12px" title="RAG chunks to retrieve (restart Chat API to apply)"></label>
         <button class="chat-send-btn" id="btn-send">Send</button>
         <button class="chat-stop-btn" id="btn-stop-chat" style="display:none">&#x23F9; Stop</button>
       </div>
@@ -423,6 +463,103 @@
         <span id="graph-status" style="color:var(--text-dim);font-size:13px;">Click Generate to build the vault graph.</span>
       </div>
       <iframe id="graph-frame" style="width:100%;flex:1;border:none;background:#1a1a2e;" sandbox="allow-scripts"></iframe>
+    </div>
+
+    <!-- Agent tab -->
+    <div class="tab-pane" id="pane-agent">
+      <div class="agent-toolbar">
+        <div class="agent-config">
+          <label>Budget (min)</label>
+          <input type="number" id="agent-budget" value="60" min="5" max="360" style="width:64px">
+        </div>
+        <div class="agent-config">
+          <label>Focus</label>
+          <select id="agent-focus">
+            <option value="all">All strategies</option>
+            <option value="security">Security</option>
+            <option value="performance">Performance</option>
+            <option value="potential_bugs">Potential Bugs</option>
+            <option value="architecture">Architecture</option>
+            <option value="code_smell">Code Smell</option>
+          </select>
+        </div>
+        <button class="btn primary" id="btn-agent-start" style="margin-left:auto">🤖 Start Analysis</button>
+        <button class="btn stop"    id="btn-agent-stop"  style="display:none">■ Stop</button>
+        <button class="agent-advanced-toggle" id="btn-agent-advanced" title="Advanced settings">⚙ Advanced ▸</button>
+        <span id="agent-status-text" style="font-size:12px;color:var(--text-muted)"></span>
+      </div>
+      <!-- Advanced row -->
+      <div class="agent-advanced-row" id="agent-advanced-row">
+        <div class="agent-config">
+          <label title="Max LLM tool-calls per strategy">Max calls / strategy</label>
+          <input type="number" id="agent-max-calls" value="25" min="5" max="100" style="width:56px">
+        </div>
+        <div class="agent-config">
+          <label title="Max grep results returned per search">Grep limit</label>
+          <input type="number" id="agent-grep-limit" value="50" min="10" max="200" style="width:56px">
+        </div>
+        <div class="agent-config">
+          <label title="Number of vault notes retrieved per SEARCH_NOTES call">Notes k</label>
+          <input type="number" id="agent-notes-k" value="8" min="1" max="20" style="width:48px">
+        </div>
+        <span style="font-size:11px;color:var(--text-muted);margin-left:auto">Changes apply on next run</span>
+      </div>
+      <div class="agent-status-bar" id="agent-status-bar">
+        <span id="agent-strategy-label" style="color:var(--accent);font-weight:700"></span>
+        <span id="agent-tool-calls"></span>
+        <span id="agent-findings-count" style="color:var(--success)"></span>
+      </div>
+      <div class="agent-findings" id="agent-findings">
+        <div style="color:var(--text-muted);font-size:13px;text-align:center;margin-top:40px">Start the agent to begin analysis. Findings will appear here in real time.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Confirm Modal ──────────────────────────────────────── -->
+<div id="confirm-modal" style="
+  display:none; position:fixed; inset:0; z-index:9999;
+  background:rgba(0,0,0,.55); backdrop-filter:blur(4px);
+  align-items:center; justify-content:center;
+">
+  <div style="
+    background:var(--card); border:1px solid var(--border);
+    border-radius:14px; padding:32px 28px 24px;
+    width:360px; max-width:90vw;
+    box-shadow:0 24px 60px rgba(0,0,0,.6);
+    display:flex; flex-direction:column; gap:16px;
+  ">
+    <!-- Icon + title -->
+    <div style="display:flex;align-items:center;gap:12px">
+      <div style="
+        width:42px;height:42px;border-radius:50%;
+        background:rgba(239,68,68,.15);border:1.5px solid rgba(239,68,68,.35);
+        display:flex;align-items:center;justify-content:center;
+        font-size:20px;flex-shrink:0
+      ">🗑</div>
+      <div>
+        <div id="confirm-title" style="font-weight:700;font-size:15px">Clear Vault?</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Destructive action</div>
+      </div>
+    </div>
+    <!-- Body -->
+    <p id="confirm-body" style="
+      margin:0;font-size:13px;color:var(--text-muted);line-height:1.6;
+      background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.18);
+      border-radius:8px;padding:10px 12px
+    "></p>
+    <!-- Buttons -->
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+      <button id="confirm-cancel" style="
+        padding:7px 18px;border-radius:8px;border:1px solid var(--border);
+        background:transparent;color:var(--text);cursor:pointer;font-size:13px;
+        transition:background .15s
+      ">Cancel</button>
+      <button id="confirm-ok" style="
+        padding:7px 18px;border-radius:8px;border:none;
+        background:var(--danger);color:#fff;cursor:pointer;
+        font-weight:600;font-size:13px;transition:opacity .15s
+      ">Clear</button>
     </div>
   </div>
 </div>

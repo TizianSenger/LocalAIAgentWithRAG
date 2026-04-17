@@ -24,6 +24,7 @@ from config import (
     REPO_PATH, VAULT_CODE_PATH, STATE_FILE,
     LLM_MODEL, CODE_EXTENSIONS, SKIP_DIRS, INDEXER_WORKERS,
 )
+from dep_graph import build_graph as _build_dep_graph
 
 # Allow UI to override the model via environment variable
 LLM_MODEL = os.environ.get('OVERRIDE_LLM_MODEL', LLM_MODEL)
@@ -33,16 +34,23 @@ LLM_MODEL = os.environ.get('OVERRIDE_LLM_MODEL', LLM_MODEL)
 # ---------------------------------------------------------------------------
 _thread_local = threading.local()
 
+def _get_model():
+    """Return a per-thread OllamaLLM instance."""
+    if not hasattr(_thread_local, "model"):
+        _thread_local.model = OllamaLLM(model=LLM_MODEL)
+    return _thread_local.model
+
+
 def _get_chain():
-    """Return a per-thread LLM chain (avoids shared-state issues)."""
+    """Return a per-thread LLM chain (avoids shared-state issues). Uses generic template."""
     if not hasattr(_thread_local, "chain"):
         model  = OllamaLLM(model=LLM_MODEL)
-        prompt = ChatPromptTemplate.from_template(_ANALYSIS_TEMPLATE)
+        prompt = ChatPromptTemplate.from_template(_ANALYSIS_TEMPLATE_GENERIC)
         _thread_local.chain = prompt | model
     return _thread_local.chain
 
 
-_ANALYSIS_TEMPLATE = """You are a senior software architect writing concise documentation.
+_ANALYSIS_TEMPLATE_GENERIC = """You are a senior software architect writing concise documentation.
 Analyse the source-code file below and respond ONLY with structured Markdown.
 
 File: {filepath}
@@ -54,7 +62,7 @@ File: {filepath}
 Use exactly this structure (keep the headings, fill in the content):
 
 ## Purpose
-(1–3 sentences: what this file / module does and why it exists)
+(2–6 sentences: what this file / module does and why it exists)
 
 ## Classes & Functions
 (bullet list – for each class or important function: name + one-line description)
@@ -66,6 +74,89 @@ Use exactly this structure (keep the headings, fill in the content):
 ## Notes
 (optional: design patterns, caveats, TODOs found in the code)
 """
+
+_ANALYSIS_TEMPLATE_CODE = """You are a senior software architect writing precise technical documentation.
+Analyse the source file below and respond ONLY with structured Markdown.
+Be specific and technical — this documentation will be used by developers to navigate and modify the codebase.
+
+File: {filepath}
+
+```
+{code}
+```
+
+Use exactly this structure (keep ALL headings, fill in the content):
+
+## Purpose
+(2–4 sentences: what this class/module does, its role in the system, and when it is used)
+
+## Package & Type
+- **Package / Namespace**: (full package or namespace, or "none")
+- **Type**: (class / abstract class / interface / enum / object / module / etc.)
+- **Extends / Inherits**: (parent class or "none")
+- **Implements / Mixins**: (comma-separated list or "none")
+
+## Public API
+(bullet list of every public method/function/constructor with its signature and a one-line description)
+- `methodName(ParamType param)` → what it does
+
+## Key Dependencies
+(bullet list of injected services, repositories, or important classes/modules this file uses;
+ format each as an Obsidian wikilink: [[ClassName]])
+
+## Relationships
+(bullet list of other classes/modules this file calls, creates, or is called by;
+ use Obsidian wikilinks where possible: [[ClassName]])
+
+## Entry Points
+(list any HTTP endpoints, event listeners, scheduled jobs, exported functions, or framework hooks defined here;
+ or "none")
+
+## Notes
+(design patterns used, important caveats, security-sensitive code, TODOs, or known issues)
+"""
+
+_ANALYSIS_TEMPLATE_CONFIG = """You are a senior software architect writing concise documentation.
+Analyse the configuration/schema file below and respond ONLY with structured Markdown.
+
+File: {filepath}
+
+```
+{code}
+```
+
+Use exactly this structure:
+
+## Purpose
+(2–6 sentences: what this file configures or defines)
+
+## Key Elements
+(bullet list of the most important keys, elements, beans, or schema definitions)
+
+## Relationships
+(bullet list of other files, classes or services this config references, as Obsidian wikilinks: [[Name]])
+
+## Notes
+(environment-specific settings, secrets, caveats)
+"""
+
+# OOP source files get the detailed code template; config/schema files get a lightweight one
+_OOP_EXTENSIONS     = {'.java', '.kt', '.scala', '.groovy', '.cs', '.py', '.rb',
+                       '.go', '.rs', '.swift', '.cpp', '.c', '.h', '.hpp',
+                       '.ts', '.tsx', '.js', '.jsx', '.php', '.fs', '.vb',
+                       '.xtend', '.clj'}
+_CONFIG_EXTENSIONS  = {'.xml', '.yaml', '.yml', '.toml', '.properties', '.ini',
+                       '.ecore', '.genmodel', '.xsd', '.target', '.product',
+                       '.feature', '.gradle', '.kts', '.pom', '.bnd', '.bndrun'}
+
+
+def _pick_template(fpath: str) -> str:
+    ext = os.path.splitext(fpath)[1].lower()
+    if ext in _OOP_EXTENSIONS:
+        return _ANALYSIS_TEMPLATE_CODE
+    if ext in _CONFIG_EXTENSIONS:
+        return _ANALYSIS_TEMPLATE_CONFIG
+    return _ANALYSIS_TEMPLATE_GENERIC
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -119,11 +210,16 @@ def _process_file(fpath: str) -> tuple[str, str]:
     with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
         code = f.read()
 
-    if len(code) > 14_000:
-        code = code[:14_000] + "\n\n... (file truncated for analysis)"
+    # OOP source files get more token budget; configs less
+    ext = os.path.splitext(fpath)[1].lower()
+    max_chars = 18_000 if ext in _OOP_EXTENSIONS else 8_000
+    if len(code) > max_chars:
+        code = code[:max_chars] + "\n\n... (file truncated for analysis)"
 
     relative = os.path.relpath(fpath, REPO_PATH)
-    analysis = _get_chain().invoke({"filepath": relative, "code": code})
+    template = _pick_template(fpath)
+    chain    = ChatPromptTemplate.from_template(template) | _get_model()
+    analysis = chain.invoke({"filepath": relative, "code": code})
 
     note_path  = _vault_note_path(fpath)
     note_title = os.path.splitext(os.path.basename(note_path))[0]
@@ -233,6 +329,16 @@ def index_repo(force: bool = False) -> dict:
                     _save_state(new_state)
 
     _save_state(new_state)
+
+    # Rebuild the dependency graph after indexing
+    if stats['analysed'] > 0:
+        print('\n[dep_graph] Building dependency graph...', flush=True)
+        try:
+            g = _build_dep_graph()
+            print(f"[dep_graph] Done — {len(g)-1} classes/modules mapped.", flush=True)
+        except Exception as exc:
+            print(f'[dep_graph] WARNING: could not build graph: {exc}', flush=True)
+
     return stats
 
 

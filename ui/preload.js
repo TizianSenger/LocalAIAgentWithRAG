@@ -20,8 +20,9 @@ contextBridge.exposeInMainWorld('api', {
   stopUpdate:  () => ipcRenderer.send('stop-update'),
 
   // Chat API
-  startChatApi: () => ipcRenderer.send('start-chat-api'),
-  stopChatApi:  () => ipcRenderer.send('stop-chat-api'),
+  startChatApi:   () => ipcRenderer.send('start-chat-api'),
+  stopChatApi:    () => ipcRenderer.send('stop-chat-api'),
+  setChatRagK:    (k) => ipcRenderer.send('set-chat-rag-k', k),
   // Chat streaming via IPC
   streamChat:        (q)  => ipcRenderer.send('chat-stream-start', q),
   abortChat:         ()   => ipcRenderer.send('chat-stream-abort'),
@@ -46,6 +47,13 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings:   (patch) => ipcRenderer.send('save-settings', patch),
   // Graph
   generateGraph:  ()      => ipcRenderer.invoke('generate-graph'),
+
+  // Agent
+  startAgent: (opts) => ipcRenderer.send('start-agent', opts),
+  stopAgent:  ()     => ipcRenderer.send('stop-agent'),
+  onAgentProgress: (cb) => ipcRenderer.on('agent-progress', (_, d) => cb(d)),
+  onAgentFinding:  (cb) => ipcRenderer.on('agent-finding',  (_, d) => cb(d)),
+  onAgentDone:     (cb) => ipcRenderer.on('agent-done',     (_, d) => cb(d)),
 
   // Events from main
   onOutput:       (cb) => ipcRenderer.on('process-output',   (_, d) => cb(d)),
