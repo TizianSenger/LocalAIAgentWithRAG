@@ -20,9 +20,25 @@ INDEXER_WORKERS = 1
 PYTHON_EXE = sys.executable
 
 CODE_EXTENSIONS = {
+    # General languages
     ".py", ".java", ".cs", ".ts", ".js", ".tsx", ".jsx",
     ".cpp", ".c", ".h", ".hpp", ".rs", ".go", ".kt", ".swift",
-    ".rb", ".php", ".fs", ".vb",
+    ".rb", ".php", ".fs", ".vb", ".scala", ".groovy", ".clj",
+    # Eclipse / EMF / Xtext
+    ".ecore", ".genmodel", ".xcore", ".xtext", ".xtend",
+    ".mwe2", ".workflow", ".qvto", ".ocl", ".uml",
+    # Eclipse build / config
+    ".target", ".product", ".feature", ".exsd",
+    ".bnd", ".bndrun",
+    # Build / project descriptors
+    ".xml", ".gradle", ".kts", ".pom", ".project", ".classpath",
+    ".properties", ".yaml", ".yml", ".toml", ".ini", ".conf",
+    # Web / templating
+    ".html", ".htm", ".css", ".scss", ".less",
+    # SQL / data / schema
+    ".sql", ".graphql", ".proto", ".xsd",
+    # Shell / scripts
+    ".sh", ".bat", ".ps1",
 }
 
 SKIP_DIRS = {

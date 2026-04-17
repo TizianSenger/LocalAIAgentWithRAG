@@ -1,12 +1,29 @@
 // --- Tab switching ---
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
+    if (btn.disabled) return
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'))
     btn.classList.add('active')
     document.getElementById(`pane-${btn.dataset.tab}`).classList.add('active')
   })
 })
+
+function setChatTabLocked (locked) {
+  const btn = document.getElementById('tab-btn-chat')
+  btn.disabled = locked
+  btn.title    = locked ? 'Chat ist gesperrt während der Indexer läuft' : 'Chat öffnen'
+  btn.textContent = locked ? 'Chat 🔒' : 'Chat ✓'
+  if (locked) {
+    // Wenn Chat-Tab gerade aktiv ist → zurück zu Logs
+    if (btn.classList.contains('active')) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'))
+      document.querySelector('[data-tab="logs"]').classList.add('active')
+      document.getElementById('pane-logs').classList.add('active')
+    }
+  }
+}
 
 // --- Window controls ---
 document.getElementById('win-minimize').addEventListener('click', () => window.api.minimize())
@@ -156,8 +173,9 @@ window.api.onProgress(({ done, total, file, elapsed, eta }) => {
 
 window.api.onIndexerDone(() => {
   progressStart = null
-  // keep banner for 3s then hide
   setTimeout(() => banner.classList.remove('visible'), 3000)
+  setChatTabLocked(false)
+  appendLog({ source: 'system', text: 'Indexer fertig — Chat ist jetzt verfügbar.', type: 'info', ts: timestamp() })
 })
 
 // --- IPC events ---
@@ -167,8 +185,12 @@ window.api.onOutput(({ source, text, type }) => {
 
 window.api.onStatus(({ source, status }) => {
   setDot(source, status)
-  if (source === 'indexer' && status !== 'running') {
-    setTimeout(() => banner.classList.remove('visible'), 3000)
+  if (source === 'indexer') {
+    if (status === 'running') {
+      setChatTabLocked(true)
+    } else {
+      setTimeout(() => banner.classList.remove('visible'), 3000)
+    }
   }
 })
 
