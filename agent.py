@@ -111,7 +111,7 @@ def tool_grep(pattern: str, file_ext: str = '', max_results: int = 50) -> str:
     return '\n'.join(results) if results else 'No matches found.'
 
 
-def tool_read_file(relative_path: str, start_line: int = 0, max_lines: int = 120) -> str:
+def tool_read_file(relative_path: str, start_line: int = 0, max_lines: int = 200) -> str:
     """Read a file from the repository (relative path from repo root).
     start_line: 0-based line offset to start reading from (useful for large files).
     """
@@ -224,16 +224,17 @@ Your task is to find real issues in the code for the category: {category}.
 
 WORKFLOW:
 1. Start with SEARCH_NOTES or LIST_FILES to orient yourself in the codebase.
-2. Use GREP to find suspicious patterns, READ_FILE to inspect specific files.
-3. For large files (>120 lines), use READ_FILE with an offset to read section by section.
-4. For each real, specific issue found, immediately call WRITE_FINDING.
+2. Use GREP to find suspicious patterns.
+3. For each suspicious GREP hit: call READ_FILE on that file to inspect the actual code.
+4. ONLY AFTER reading the file, call WRITE_FINDING if a real issue is confirmed.
 5. Keep investigating different files and patterns until you have exhausted the category.
 6. When done (minimum 6 tool calls), output exactly: DONE
 
 RULES:
 - Call exactly ONE tool per message. Wait for the result before the next call.
+- CRITICAL: You MUST call READ_FILE on a file BEFORE you may call WRITE_FINDING for it. GREP alone is never sufficient evidence.
 - Never repeat the same tool call with identical arguments more than once.
-- Only call WRITE_FINDING for real, specific issues — include the exact file path.
+- Only call WRITE_FINDING for real, specific issues confirmed by reading actual code — include the exact file path and the problematic line/function.
 - Do NOT say DONE before making at least 6 tool calls.
 - The codebase may be large with many legacy files — keep exploring systematically.
 
@@ -332,6 +333,7 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
     consecutive_invalid = 0  # times model output neither tool call nor DONE
     last_tool_sig     = None   # (tool_name, first_arg) — repeat detection
     repeat_count      = 0
+    files_read        = set()  # tracks files read this strategy — required before WRITE_FINDING
 
     print(f'\n[agent] === Strategy: {strategy.upper()} ===', flush=True)
     _emit_progress(strategy=strategy, tool_calls=0, findings=len(findings))
@@ -398,6 +400,14 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
             continue
         consecutive_invalid = 0
 
+        # Reject batch: multiple WRITE_FINDINGs in one response
+        all_calls_in_response = _TOOL_CALL_RE.findall(response_text)
+        finding_count_in_response = sum(1 for n, _ in all_calls_in_response if n == 'WRITE_FINDING')
+        if finding_count_in_response > 1:
+            print(f'[agent] Rejected batch of {finding_count_in_response} findings — model must submit ONE at a time.', flush=True)
+            conversation.append(HumanMessage(content=f'You submitted {finding_count_in_response} WRITE_FINDING calls at once. You MUST submit exactly ONE tool call per message. Also, you MUST call READ_FILE on a file before reporting findings for it. Start over: call READ_FILE on one file, then WRITE_FINDING for that one finding only.'))
+            continue
+
         tool_calls += 1
 
         # Detect repeated identical tool calls
@@ -423,6 +433,14 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
             category    = tool_args[1] if len(tool_args) > 1 else strategy
             file_path   = tool_args[2] if len(tool_args) > 2 else 'unknown'
             description = tool_args[3] if len(tool_args) > 3 else 'No description'
+            # Require READ_FILE before WRITE_FINDING for this file
+            fp_norm = file_path.strip().replace('\\', '/').lower()
+            read_match = any(fp_norm in r or r in fp_norm for r in files_read)
+            if not read_match:
+                print(f'[agent] WRITE_FINDING rejected — {file_path} not yet read this strategy.', flush=True)
+                tool_calls -= 1  # don't count this as a valid call
+                conversation.append(HumanMessage(content=f'REJECTED: You must call READ_FILE({file_path}) before reporting a finding for it. GREP results are not enough — read the actual code first, confirm the issue exists, then call WRITE_FINDING.'))
+                continue
             # Deduplicate: skip if same file + first 60 chars of description already seen
             dedup_key = (file_path.strip(), description.strip()[:60].lower())
             if dedup_key in seen_keys:
@@ -437,6 +455,10 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
                 conversation.append(HumanMessage(content=f'Finding recorded: [{f.severity}] {f.description}. Good work! Now keep investigating — there may be more issues. Use GREP, READ_FILE, or LIST_FILES to explore further. Do NOT say DONE yet.'))
         else:
             print(f'[agent] Tool call: {tool_name}({", ".join(tool_args[:2])})', flush=True)
+            # Track which files have been read this strategy
+            if tool_name == 'READ_FILE' and tool_args:
+                read_path = tool_args[0].split(',')[0].strip().replace('\\', '/').lower()
+                files_read.add(read_path)
             result = _run_tool(tool_name, tool_args)
             # Truncate very long results
             if len(result) > 3000:
@@ -527,12 +549,15 @@ def main():
                         help=f'Comma-separated strategies or "all". Options: {", ".join(STRATEGIES)}')
     parser.add_argument('--report-path', type=str, default='',
                         help='Override output path for the report')
-    parser.add_argument('--max-calls', type=int, default=25,
-                        help='Max LLM tool-calls per strategy (default: 25)')
+    parser.add_argument('--max-calls', type=int, default=60,
+                        help='Max LLM tool-calls per strategy (default: 60)')
     parser.add_argument('--grep-limit', type=int, default=50,
                         help='Max grep results per search (default: 50)')
     parser.add_argument('--notes-k', type=int, default=8,
                         help='Number of vault notes retrieved per SEARCH_NOTES call (default: 8)')
+    parser.add_argument('--mode', type=str, default='explore',
+                        choices=['explore', 'deep'],
+                        help='explore = smart GREP-based agent (default); deep = reads every file line-by-line')
     args = parser.parse_args()
 
     # Populate runtime settings
@@ -547,7 +572,7 @@ def main():
     if not focus:
         focus = STRATEGIES
 
-    print(f'[agent] Starting — budget: {"unlimited (full scan)" if args.budget_minutes == 0 else str(args.budget_minutes) + " min"}, strategies: {focus}', flush=True)
+    print(f'[agent] Starting — mode: {args.mode}, budget: {"unlimited" if args.budget_minutes == 0 else str(args.budget_minutes) + " min"}, strategies: {focus}', flush=True)
     print(f'[agent] Settings — max_calls: {args.max_calls}, grep_limit: {args.grep_limit}, notes_k: {args.notes_k}', flush=True)
     print(f'[agent] Model: {LLM_MODEL}', flush=True)
     _emit_progress(strategy='init', tool_calls=0, findings=0)
@@ -556,15 +581,17 @@ def main():
     print(f'[agent] LLM timeout: {llm_timeout}s (based on model size)', flush=True)
     model      = OllamaLLM(model=LLM_MODEL, temperature=0.1, timeout=llm_timeout)
     findings   = []
-    seen_keys  = set()   # deduplication across all strategies
+    seen_keys  = set()
     start_time = time.time()
 
-    for strategy in focus:
-        if time.time() - start_time > budget_seconds:
-            print('[agent] Time budget reached — stopping early.', flush=True)
-            break
-        remaining = budget_seconds - (time.time() - start_time)
-        run_strategy(strategy, model, findings, seen_keys, budget_seconds, start_time)
+    if args.mode == 'deep':
+        run_deep_scan(model, findings, seen_keys, focus, budget_seconds, start_time)
+    else:
+        for strategy in focus:
+            if time.time() - start_time > budget_seconds:
+                print('[agent] Time budget reached — stopping early.', flush=True)
+                break
+            run_strategy(strategy, model, findings, seen_keys, budget_seconds, start_time)
 
     elapsed = time.time() - start_time
     report  = generate_report(findings, focus, elapsed)
@@ -595,7 +622,271 @@ def main():
         print(f'[agent] VRAM unload skipped: {e}', flush=True)
 
 
+def _split_into_units(lines: list, header_end: int, max_unit: int = 250) -> list:
+    """Split source lines into logical units at top-level function/class boundaries.
+
+    Returns list of (start_line_0based, end_line_exclusive) tuples.
+    Each unit is guaranteed ≤ max_unit lines (hard split if needed).
+    The file header (imports / module docstring up to header_end) is always
+    included as the first unit so every call sees the imports.
+    """
+    TOP_LEVEL_STARTERS = ('def ', 'async def ', 'class ', '# %%', '// ')
+    units: list = []
+
+    # First unit = file header block (always sent)
+    if header_end > 0 and len(lines) > header_end:
+        units.append((0, header_end))
+
+    unit_start = header_end
+    for i in range(header_end, len(lines)):
+        stripped = lines[i].lstrip()
+        indent   = len(lines[i]) - len(stripped)
+        is_boundary = (
+            indent == 0
+            and any(stripped.startswith(s) for s in TOP_LEVEL_STARTERS)
+            and i > unit_start + 4          # at least 5 lines in previous unit
+        )
+        if is_boundary or (i - unit_start) >= max_unit:
+            if i > unit_start:
+                units.append((unit_start, i))
+            unit_start = i
+
+    if unit_start < len(lines):
+        units.append((unit_start, len(lines)))
+
+    # Hard-split any unit that is still too long
+    result: list = []
+    for (s, e) in units:
+        if e - s <= max_unit:
+            result.append((s, e))
+        else:
+            for split_s in range(s, e, max_unit):
+                result.append((split_s, min(split_s + max_unit, e)))
+    return result
+
+
+def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
+                  budget_seconds: float, start_time: float):
+    """Deep Scan mode: function-level code review with optional verification pass.
+
+    Design:
+    - Only scans actual source code files (not XML/YAML/HTML/CSS/config noise).
+    - Split each file at top-level function/class boundaries → LLM always
+      sees complete, self-contained units of code, never torn fragments.
+    - File header (imports, globals) is prepended to every unit so the LLM
+      knows the full module context.
+    - Conservative prompt: requires specific line numbers, function names, and
+      a concrete impact statement. Vague single-word findings are discarded.
+    - After scanning all files, a lightweight verification pass re-shows each
+      candidate finding alongside its source code and asks the LLM to confirm
+      it is a genuine issue — eliminating false positives.
+    """
+    # Only scan actual programming language files — skip config/markup/build noise
+    DEEP_SCAN_EXTENSIONS = {
+        '.py', '.java', '.cs', '.ts', '.js', '.tsx', '.jsx',
+        '.cpp', '.c', '.h', '.hpp', '.rs', '.go', '.kt', '.swift',
+        '.rb', '.php', '.fs', '.vb', '.scala', '.groovy', '.clj',
+        '.xtend', '.xtext',
+        '.sh', '.bat', '.ps1',
+        '.sql', '.graphql',
+    }
+    HEADER_ROWS  = 80    # lines treated as file header (imports / module doc)
+    MAX_UNIT     = 250   # max lines per function/class unit
+    MIN_DESC_LEN = 40    # discard one-liner non-specific descriptions shorter than this
+
+    strat_text = '\n'.join(f'- {STRATEGY_DESCRIPTIONS[s]}' for s in strategies)
+
+    system_prompt = (
+        'You are a senior software engineer doing a professional code review.\n'
+        'You will be shown one function, class, or module section at a time.\n\n'
+        'Review for the following issue types:\n' + strat_text + '\n\n'
+        'STRICT OUTPUT RULES:\n'
+        '1. Only report issues you are highly confident are GENUINE bugs, security flaws, '
+        'performance problems, or dangerous logic errors. Do NOT report style preferences, '
+        'naming conventions, missing docstrings, or hypothetical edge-cases with no evidence.\n'
+        '2. For each confirmed issue output EXACTLY one line:\n'
+        '     WRITE_FINDING(<SEVERITY>, <category>, <file_path>, "<description>")\n'
+        '   SEVERITY: CRITICAL | HIGH | MEDIUM | LOW\n'
+        '3. Every description MUST contain:\n'
+        '   • The line number (e.g. "Line 47:")\n'
+        '   • The exact function or variable name\n'
+        '   • What can go wrong (concrete impact, not a vague label)\n'
+        '   Example: "Line 47: token = request.args[\'token\'] in validate() — '
+        'KeyError if token missing, no default or try/except"\n'
+        '4. Do NOT invent issues that are not visible in the provided code.\n'
+        '5. If there are no genuine issues output exactly: NONE\n'
+        '6. Output nothing else — no markdown, no explanation, no headers.'
+    )
+
+    _FIND_RE = re.compile(
+        r'WRITE_FINDING\(\s*(\w+)\s*,\s*(\w+)\s*,\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)',
+        re.IGNORECASE,
+    )
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+    def _is_vague(desc: str) -> bool:
+        """Reject single-word or very short findings the LLM emits as filler."""
+        if len(desc) < MIN_DESC_LEN:
+            return True
+        vague_phrases = (
+            'potential issue', 'possible bug', 'may cause', 'could be improved',
+            'needs review', 'consider', 'TODO', 'fixme',
+        )
+        dl = desc.lower()
+        return any(p in dl for p in vague_phrases) and len(desc) < 80
+
+    def _parse_candidates(text: str, default_rel: str) -> list:
+        candidates = []
+        for m in _FIND_RE.finditer(text):
+            severity = m.group(1).strip().upper()
+            category = m.group(2).strip()
+            ffile    = m.group(3).strip().strip('"\'') or default_rel
+            desc     = m.group(4).strip()
+            if _is_vague(desc):
+                print(f'[deep] discarded vague: {desc[:60]}', flush=True)
+                continue
+            if severity not in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW'):
+                continue
+            candidates.append((severity, category, ffile, desc))
+        return candidates
+
+    def _record(severity: str, category: str, ffile: str, desc: str) -> None:
+        key = (ffile, desc[:60].lower())
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        f_obj = Finding(severity, category, ffile, desc)
+        findings.append(f_obj)
+        print(f'AGENT_FINDING:{json.dumps(f_obj.to_dict())}', flush=True)
+        print(f'[deep] [{severity}] {ffile}: {desc[:100]}', flush=True)
+
+    def _call_llm(user_msg: str, label: str) -> str | None:
+        for attempt in range(3):
+            try:
+                print(f'[agent] Querying LLM… ({label})', flush=True)
+                return str(model.invoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_msg),
+                ])).strip()
+            except Exception as exc:
+                wait = 2 ** attempt
+                print(f'[deep] LLM error (attempt {attempt+1}/3): {exc} — retry in {wait}s', flush=True)
+                time.sleep(wait)
+        return None
+
+    def _verify_finding(severity: str, category: str, ffile: str, desc: str,
+                        code_snippet: str) -> bool:
+        """Ask the LLM to confirm a candidate finding is genuine."""
+        verify_prompt = (
+            f'File: {ffile}\n\nCode:\n```\n{code_snippet}\n```\n\n'
+            f'Candidate finding: [{severity}] {desc}\n\n'
+            'Is this a GENUINE issue clearly visible in the code above?\n'
+            'Answer with YES or NO on the first line, then optionally one sentence of reasoning.'
+        )
+        try:
+            print(f'[agent] Querying LLM… (verify)', flush=True)
+            resp = str(model.invoke([
+                SystemMessage(content='You are a code review validator. Be strict — only confirm real issues.'),
+                HumanMessage(content=verify_prompt),
+            ])).strip()
+            return resp.upper().startswith('YES')
+        except Exception:
+            return True  # on failure, keep the finding
+
+    # ── Collect all code files ────────────────────────────────────────────────
+    all_files: list = []
+    for root, dirs, files in os.walk(REPO_PATH):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith('.')]
+        for fname in sorted(files):
+            if any(fname.endswith(e) for e in DEEP_SCAN_EXTENSIONS):
+                all_files.append(os.path.join(root, fname))
+
+    total_files = len(all_files)
+    print(f'[deep] {total_files} source files to analyse (config/markup skipped)', flush=True)
+
+    # ── Phase 1: scan ─────────────────────────────────────────────────────────
+    call_no    = 0
+    candidates: list = []   # (severity, category, ffile, desc, code_snippet)
+
+    for file_idx, fpath in enumerate(all_files):
+        if time.time() - start_time > budget_seconds:
+            print('[deep] Time budget reached during scan — stopping.', flush=True)
+            break
+
+        rel = os.path.relpath(fpath, REPO_PATH).replace('\\', '/')
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
+                all_lines = fh.readlines()
+        except OSError:
+            continue
+
+        total_lines = len(all_lines)
+        if total_lines == 0:
+            continue
+
+        _emit_progress(strategy=f'deep:{rel}', tool_calls=call_no, findings=len(findings))
+        print(f'[deep] [{file_idx+1}/{total_files}] {rel} ({total_lines} lines)', flush=True)
+
+        header_end   = min(HEADER_ROWS, total_lines)
+        header_block = ''.join(all_lines[:header_end])
+        units        = _split_into_units(all_lines, header_end, MAX_UNIT)
+
+        for (u_start, u_end) in units:
+            if time.time() - start_time > budget_seconds:
+                break
+
+            unit_lines = all_lines[u_start:u_end]
+            call_no   += 1
+
+            # Always prepend the header so the LLM sees imports/globals
+            if u_start >= header_end:
+                preamble = (
+                    f'=== {rel} — module header (lines 1–{header_end}, for context) ===\n'
+                    + header_block
+                    + f'=== section to review: lines {u_start+1}–{u_end} ===\n'
+                )
+            else:
+                preamble = f'=== {rel} — lines {u_start+1}–{u_end} (full file header) ===\n'
+
+            user_msg = preamble + ''.join(unit_lines)
+            label    = f'{rel}:{u_start+1}-{u_end}'
+            _emit_progress(strategy=f'deep:{rel}', tool_calls=call_no, findings=len(findings))
+
+            resp = _call_llm(user_msg, label)
+            if not resp or resp.upper() == 'NONE':
+                continue
+
+            for (sev, cat, ff, desc) in _parse_candidates(resp, rel):
+                # store snippet for verification (surrounding ±10 lines in file)
+                snip_start = max(0, u_start - 5)
+                snip_end   = min(total_lines, u_end + 5)
+                snippet    = ''.join(all_lines[snip_start:snip_end])
+                candidates.append((sev, cat, ff, desc, snippet))
+
+    # ── Phase 2: verify ───────────────────────────────────────────────────────
+    # Only verify MEDIUM/LOW — CRITICAL and HIGH are recorded directly
+    print(f'[deep] Scan done — {len(candidates)} candidates, starting verification…', flush=True)
+    for (sev, cat, ff, desc, snippet) in candidates:
+        if time.time() - start_time > budget_seconds:
+            print('[deep] Budget reached during verification — recording remaining as-is.', flush=True)
+            _record(sev, cat, ff, desc)
+            continue
+
+        if sev in ('CRITICAL', 'HIGH'):
+            _record(sev, cat, ff, desc)
+        else:
+            confirmed = _verify_finding(sev, cat, ff, desc, snippet)
+            if confirmed:
+                _record(sev, cat, ff, desc)
+            else:
+                print(f'[deep] rejected by verification: {desc[:60]}', flush=True)
+
+    print(f'[deep] Done — {call_no} LLM calls, {len(findings)} confirmed findings.', flush=True)
+
+
+
 def _get_model_timeout(model_name: str) -> int:
+
     """Query Ollama for the model size and return an appropriate timeout in seconds.
 
     Thresholds (unquantized parameter count estimate via file size):

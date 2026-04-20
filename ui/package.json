@@ -1,7 +1,7 @@
 {
   "name": "natmss-agent-ui",
   "version": "1.0.0",
-  "description": "natMSS Code Intelligence Agent UI",
+  "description": "Code Intelligence Agent UI",
   "main": "main.js",
   "scripts": {
     "start": "electron ."

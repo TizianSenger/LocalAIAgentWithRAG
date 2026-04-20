@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   minimize:   ()  => ipcRenderer.send('win-minimize'),
   maximize:   ()  => ipcRenderer.send('win-maximize'),
   close:      ()  => ipcRenderer.send('win-close'),
+  onWindowMaximized: (cb) => ipcRenderer.on('window-maximized', (_, v) => cb(v)),
 
   // Ollama
   startOllama: (workers) => ipcRenderer.send('start-ollama', workers),

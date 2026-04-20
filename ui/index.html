@@ -28,18 +28,29 @@
   /* ── Titlebar ─────────────────────────────────────────────── */
   .titlebar {
     display: flex; align-items: center; justify-content: space-between;
-    background: var(--sidebar-bg); height: 38px; padding: 0 16px;
+    background: var(--sidebar-bg); height: 32px; padding: 0 0 0 16px;
     -webkit-app-region: drag; border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
   .titlebar-left { display: flex; align-items: center; gap: 10px; }
   .titlebar-dot  { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   .titlebar-title { font-size: 12px; font-weight: 700; letter-spacing: 0.1em; color: var(--text); text-transform: uppercase; }
-  .titlebar-controls { display: flex; gap: 8px; -webkit-app-region: no-drag; }
-  .titlebar-controls button { width: 12px; height: 12px; border-radius: 50%; border: none; cursor: pointer; transition: opacity .15s; }
-  .titlebar-controls button:hover { opacity: .75; }
-  .btn-close    { background: #ff5f57; }
-  .btn-minimize { background: #febc2e; }
-  .btn-maximize { background: #28c840; }
+
+  /* Windows 11-style caption buttons — right-aligned, no gap */
+  .titlebar-controls {
+    display: flex; align-items: stretch; height: 32px;
+    -webkit-app-region: no-drag; margin-left: auto;
+  }
+  .titlebar-controls button {
+    width: 46px; height: 32px; border: none; background: transparent;
+    color: var(--text-muted); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .1s, color .1s;
+    border-radius: 0;
+  }
+  .titlebar-controls button svg { pointer-events: none; }
+  .btn-minimize:hover { background: rgba(255,255,255,.08); color: var(--text); }
+  .btn-maximize:hover { background: rgba(255,255,255,.08); color: var(--text); }
+  .btn-close:hover    { background: #c42b1c; color: #fff; }
 
   /* ── Stats bar ────────────────────────────────────────────── */
   .statsbar {
@@ -281,12 +292,18 @@
 <div class="titlebar">
   <div class="titlebar-left">
     <div class="titlebar-dot"></div>
-    <div class="titlebar-title">natMSS Code Intelligence Agent</div>
+    <div class="titlebar-title">Code Intelligence Agent</div>
   </div>
   <div class="titlebar-controls">
-    <button class="btn-minimize" id="win-minimize" title="Minimize"></button>
-    <button class="btn-maximize" id="win-maximize" title="Maximize"></button>
-    <button class="btn-close"    id="win-close"    title="Close"></button>
+    <button class="btn-minimize" id="win-minimize" title="Minimize">
+      <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+    </button>
+    <button class="btn-maximize" id="win-maximize" title="Maximize">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x=".5" y=".5" width="9" height="9" stroke="currentColor"/></svg>
+    </button>
+    <button class="btn-close" id="win-close" title="Close">
+      <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
   </div>
 </div>
 
@@ -492,6 +509,10 @@
           <input type="checkbox" id="agent-full-scan" style="width:14px;height:14px;cursor:pointer;accent-color:var(--accent)">
           <label for="agent-full-scan" style="cursor:pointer" title="Scan until the agent has checked the entire codebase — no time limit">Full Scan</label>
         </div>
+        <div class="agent-config" style="gap:5px">
+          <input type="checkbox" id="agent-deep-scan" style="width:14px;height:14px;cursor:pointer;accent-color:#f59e0b">
+          <label for="agent-deep-scan" style="cursor:pointer;color:#f59e0b" title="Liest jede Datei Zeile für Zeile — 100% Abdeckung, deutlich langsamer">Deep Scan</label>
+        </div>
         <div class="agent-config">
           <label>Focus</label>
           <select id="agent-focus">
@@ -512,7 +533,7 @@
       <div class="agent-advanced-row" id="agent-advanced-row">
         <div class="agent-config">
           <label title="Max LLM tool-calls per strategy">Max calls / strategy</label>
-          <input type="number" id="agent-max-calls" value="25" min="5" max="100" style="width:56px">
+          <input type="number" id="agent-max-calls" value="60" min="5" max="200" style="width:56px">
         </div>
         <div class="agent-config">
           <label title="Max grep results returned per search">Grep limit</label>
@@ -611,7 +632,7 @@
         </div>
         <div style="display:flex;flex-direction:column;gap:4px">
           <label style="font-size:12px;color:var(--text-muted)">Max calls/strategy</label>
-          <input type="number" id="auto-max-calls" value="25" min="5" max="100" style="width:72px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 7px;font-size:13px">
+          <input type="number" id="auto-max-calls" value="60" min="5" max="200" style="width:72px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 7px;font-size:13px">
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-# natMSS Code Intelligence Agent
+# Code Intelligence Agent
 
 Eine vollständig **lokale** KI-Plattform zur automatischen Code-Analyse, interaktiven Code-Suche und autonomen Software-Qualitätsprüfung — komplett ohne Cloud, ohne API-Kosten, mit deinen eigenen Modellen via [Ollama](https://ollama.com).
 

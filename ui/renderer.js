@@ -30,6 +30,17 @@ document.getElementById('win-minimize').addEventListener('click', () => window.a
 document.getElementById('win-maximize').addEventListener('click', () => window.api.maximize())
 document.getElementById('win-close').addEventListener('click',    () => window.api.close())
 
+// Swap maximize ↔ restore icon when window state changes
+const _maxBtn = document.getElementById('win-maximize')
+const _iconMaximize = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x=".5" y=".5" width="9" height="9" stroke="currentColor"/></svg>`
+const _iconRestore  = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2.5" y=".5" width="7" height="7" stroke="currentColor"/><polyline points="0,2.5 0,9.5 7.5,9.5" stroke="currentColor" fill="none" stroke-width="1"/></svg>`
+if (window.api.onWindowMaximized) {
+  window.api.onWindowMaximized(maximized => {
+    _maxBtn.innerHTML = maximized ? _iconRestore : _iconMaximize
+    _maxBtn.title     = maximized ? 'Restore' : 'Maximize'
+  })
+}
+
 // --- Log output ---
 const logOutput  = document.getElementById('log-output')
 let   logFilters = new Set(['all'])  // multi-select; 'all' means no filter
@@ -619,11 +630,13 @@ document.getElementById('btn-agent-advanced').addEventListener('click', function
 function startAgent () {
   if (agentRunning) return
   const fullScan  = document.getElementById('agent-full-scan').checked
-  const budget    = fullScan ? 0 : (parseInt(document.getElementById('agent-budget').value, 10) || 60)
+  const deepScan  = document.getElementById('agent-deep-scan').checked
+  const budget    = fullScan || deepScan ? 0 : (parseInt(document.getElementById('agent-budget').value, 10) || 60)
   const focus     = document.getElementById('agent-focus').value
-  const maxCalls  = parseInt(document.getElementById('agent-max-calls').value,  10) || 25
+  const maxCalls  = parseInt(document.getElementById('agent-max-calls').value,  10) || 60
   const grepLimit = parseInt(document.getElementById('agent-grep-limit').value, 10) || 50
   const notesK    = parseInt(document.getElementById('agent-notes-k').value,    10) || 8
+  const mode      = deepScan ? 'deep' : 'explore'
 
   // Clear previous findings
   agentFindings.innerHTML = '<div style="color:var(--text-muted);font-size:13px;text-align:center;margin-top:40px">Agent is running… findings will appear here.</div>'
@@ -631,12 +644,14 @@ function startAgent () {
   setAgentRunning(true)
   // Start timer
   _agentStartTime = Date.now()
-  _agentBudgetMs  = budget * 60 * 1000   // 0 when full scan = no limit
+  _agentBudgetMs  = budget * 60 * 1000
   _tickAgentTimer()
   _agentTimerID = setInterval(_tickAgentTimer, 1000)
-  appendLog({ source: 'agent', text: `Agent started — budget: ${fullScan ? 'unlimited (full scan)' : budget + ' min'}, focus: ${focus}, max_calls: ${maxCalls}, grep: ${grepLimit}, k: ${notesK}`, type: 'info', ts: timestamp() })
 
-  window.api.startAgent({ budgetMinutes: budget, focus, maxCalls, grepLimit, notesK })
+  const modeLabel = deepScan ? 'Deep Scan (every file)' : fullScan ? 'Full Scan (unlimited)' : budget + ' min'
+  appendLog({ source: 'agent', text: `Agent started — mode: ${mode}, budget: ${modeLabel}, focus: ${focus}, max_calls: ${maxCalls}`, type: 'info', ts: timestamp() })
+
+  window.api.startAgent({ budgetMinutes: budget, focus, maxCalls, grepLimit, notesK, mode })
 }
 
 btnAgentStart.addEventListener('click', startAgent)

@@ -65,6 +65,8 @@ function createWindow () {
     },
   })
   mainWindow.loadFile(path.join(__dirname, 'index.html'))
+  mainWindow.on('maximize',   () => mainWindow.webContents.send('window-maximized', true))
+  mainWindow.on('unmaximize', () => mainWindow.webContents.send('window-maximized', false))
   mainWindow.webContents.once('did-finish-load', () => {
     startPolling()
     // Start auto-mode scheduler if enabled
@@ -182,6 +184,20 @@ function spawnTracked (key, cmd, args, opts = {}) {
   proc.stderr.on('data', d => log(key, d.toString(), 'stderr'))
   proc.on('close', code => {
     procs[key] = null
+    // Special case: ollama exits with code 1 because port is already bound by an
+    // external instance — treat as "running externally" instead of error
+    if (key === 'ollama' && code === 1) {
+      const testSock = new (require('net').Socket)()
+      testSock.setTimeout(500)
+      testSock.connect(11434, '127.0.0.1', () => {
+        testSock.destroy()
+        setStatus('ollama', 'running')
+        log('system', '[ollama] external instance detected — using it', 'info')
+      })
+      testSock.on('error',   () => { testSock.destroy(); setStatus('ollama', 'error') })
+      testSock.on('timeout', () => { testSock.destroy(); setStatus('ollama', 'error') })
+      return
+    }
     setStatus(key, code === 0 ? 'stopped' : 'error')
     log('system', `[${key}] exited with code ${code}`, code === 0 ? 'info' : 'error')
     if (key === 'indexer') send('indexer-done', { code })
@@ -211,7 +227,9 @@ function killAll () {
 
 // Window controls
 ipcMain.on('win-minimize', () => mainWindow.minimize())
-ipcMain.on('win-maximize', () => mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize())
+ipcMain.on('win-maximize', () => {
+  if (mainWindow.isMaximized()) { mainWindow.unmaximize() } else { mainWindow.maximize() }
+})
 ipcMain.on('win-close',    () => { stopPolling(); killAll(); app.quit() })
 
 // Ollama
@@ -219,8 +237,26 @@ ipcMain.on('start-ollama', (_, workers) => {
   if (procs.ollama) { log('system', '[ollama] already running', 'info'); return }
   const n = workers || 1
   indexerWorkers = n
-  spawnTracked('ollama', 'ollama', ['serve'], {
-    env: { OLLAMA_NUM_PARALLEL: String(n), OLLAMA_MAX_LOADED_MODELS: '1' },
+
+  // Check if Ollama is already listening on port 11434 (started externally)
+  const testSock = new (require('net').Socket)()
+  testSock.setTimeout(500)
+  testSock.connect(11434, '127.0.0.1', () => {
+    testSock.destroy()
+    log('system', '[ollama] already running externally — skipping spawn', 'info')
+    setStatus('ollama', 'running')
+  })
+  testSock.on('error', () => {
+    testSock.destroy()
+    spawnTracked('ollama', 'ollama', ['serve'], {
+      env: { OLLAMA_NUM_PARALLEL: String(n), OLLAMA_MAX_LOADED_MODELS: '1' },
+    })
+  })
+  testSock.on('timeout', () => {
+    testSock.destroy()
+    spawnTracked('ollama', 'ollama', ['serve'], {
+      env: { OLLAMA_NUM_PARALLEL: String(n), OLLAMA_MAX_LOADED_MODELS: '1' },
+    })
   })
 })
 
@@ -270,14 +306,15 @@ ipcMain.on('start-chat-api', () => {
 ipcMain.on('stop-chat-api',  () => killProc('chatApi'))
 
 // Agent
-ipcMain.on('start-agent', (_, { budgetMinutes, focus, maxCalls, grepLimit, notesK }) => {
+ipcMain.on('start-agent', (_, { budgetMinutes, focus, maxCalls, grepLimit, notesK, mode }) => {
   const args = [
     '-u', '-B', path.join(SCRIPTS_DIR, 'agent.py'),
-    '--budget-minutes', String(budgetMinutes || 60),
+    '--budget-minutes', String(budgetMinutes != null && budgetMinutes > 0 ? budgetMinutes : 0),
     '--focus',          focus || 'all',
-    '--max-calls',      String(maxCalls  || 25),
+    '--max-calls',      String(maxCalls  || 60),
     '--grep-limit',     String(grepLimit || 50),
     '--notes-k',        String(notesK    || 8),
+    '--mode',           mode || 'explore',
   ]
   const proc = spawn(PYTHON, args, { cwd: SCRIPTS_DIR, shell: true, env: { ...process.env, ...pyEnv() } })
   procs.agent = proc
@@ -306,7 +343,7 @@ ipcMain.on('start-agent', (_, { budgetMinutes, focus, maxCalls, grepLimit, notes
   mainWindow.webContents.send('process-status', { source: 'agent', status: 'running' })
 })
 ipcMain.on('stop-agent', () => {
-  if (procs.agent) { procs.agent.kill(); procs.agent = null }
+  if (procs.agent) { killProc('agent') }
 })
 
 // Model selection
