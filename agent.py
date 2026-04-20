@@ -24,7 +24,6 @@ import sys
 import json
 import re
 import time
-import csv
 import argparse
 import textwrap
 import threading
@@ -38,44 +37,6 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from config import REPO_PATH, VAULT_PATH, LLM_MODEL, SKIP_DIRS, CODE_EXTENSIONS
 from dep_graph import load_graph, get_dependents, get_class_info
 from code_units import split_file_into_units
-
-# ── Persistent finding store (temp CSV) ─────────────────────────────────────
-
-class FindingStore:
-    """Writes findings immediately to a temp CSV; never keeps them all in RAM.
-    Provides a row-count and a load() method for end-of-run report generation.
-    """
-    _FIELDS = ('severity', 'category', 'file', 'description', 'ts')
-
-    def __init__(self, path: str):
-        self.path  = path
-        self._count = 0
-        with open(path, 'w', newline='', encoding='utf-8') as fh:
-            csv.DictWriter(fh, fieldnames=self._FIELDS).writeheader()
-
-    def append(self, finding: 'Finding') -> None:
-        with open(self.path, 'a', newline='', encoding='utf-8') as fh:
-            csv.DictWriter(fh, fieldnames=self._FIELDS).writerow(finding.to_dict())
-        self._count += 1
-
-    def __len__(self) -> int:
-        return self._count
-
-    def load(self) -> list['Finding']:
-        result = []
-        with open(self.path, newline='', encoding='utf-8') as fh:
-            for row in csv.DictReader(fh):
-                f = Finding(row['severity'], row['category'], row['file'], row['description'])
-                f.ts = row['ts']
-                result.append(f)
-        return result
-
-    def delete(self) -> None:
-        try:
-            os.remove(self.path)
-        except OSError:
-            pass
-
 
 # ── Allow UI to override model ────────────────────────────────────────────────
 LLM_MODEL = os.environ.get('OVERRIDE_AGENT_MODEL', os.environ.get('OVERRIDE_LLM_MODEL', LLM_MODEL))
@@ -385,7 +346,7 @@ class Finding:
 
 # ── Strategy runner ───────────────────────────────────────────────────────────
 
-def run_strategy(strategy: str, model, findings: 'FindingStore', seen_keys: set,
+def run_strategy(strategy: str, model, findings: list, seen_keys: set,
                  budget_seconds: float, start_time: float) -> int:
     """Run one analysis strategy. Returns number of tool calls made.
     seen_keys: shared set of (file, description_prefix) to avoid duplicate findings.
@@ -522,7 +483,7 @@ def run_strategy(strategy: str, model, findings: 'FindingStore', seen_keys: set,
             else:
                 seen_keys.add(dedup_key)
                 f = Finding(severity, category, file_path, description)
-                findings.append(f)  # writes to CSV immediately
+                findings.append(f)
                 print(f'AGENT_FINDING:{json.dumps(f.to_dict())}', flush=True)
                 _emit_progress(strategy=strategy, tool_calls=tool_calls, findings=len(findings))
                 conversation.append(HumanMessage(content=f'Finding recorded: [{f.severity}] {f.description}. Good work! Now keep investigating — there may be more issues. Use GREP, READ_FILE, or LIST_FILES to explore further. Do NOT say DONE yet.'))
@@ -708,19 +669,15 @@ def main():
     llm_timeout = _get_model_timeout(LLM_MODEL)
     print(f'[agent] LLM timeout: {llm_timeout}s (based on model size)', flush=True)
     model      = OllamaLLM(model=LLM_MODEL, temperature=0.1, timeout=llm_timeout)
-    ts_str     = datetime.now().strftime('%Y%m%d_%H%M%S')
-    tmp_csv    = os.path.join(REPORT_DIR, f'.findings_tmp_{ts_str}.csv')
-    os.makedirs(REPORT_DIR, exist_ok=True)
-    store      = FindingStore(tmp_csv)
+    findings   = []
     seen_keys  = set()
     start_time = time.time()
 
-    run_deep_scan(model, store, seen_keys, focus, float('inf'), start_time)
+    run_deep_scan(model, findings, seen_keys, focus, float('inf'), start_time)
 
-    elapsed  = time.time() - start_time
-    findings = cluster_findings(store.load())
-    store.delete()
-    report   = generate_report(findings, focus, elapsed)
+    elapsed = time.time() - start_time
+    findings = cluster_findings(findings)
+    report  = generate_report(findings, focus, elapsed)
 
     # Save report
     os.makedirs(REPORT_DIR, exist_ok=True)
@@ -731,7 +688,7 @@ def main():
         f.write(report)
 
     print(f'[agent] Report saved to: {report_path}', flush=True)
-    print(f'AGENT_DONE:{json.dumps({"findings": len(findings), "report_path": report_path, "elapsed_min": round(elapsed/60, 1)})}', flush=True)  # findings list is small here (clustered)
+    print(f'AGENT_DONE:{json.dumps({"findings": len(findings), "report_path": report_path, "elapsed_min": round(elapsed/60, 1)})}', flush=True)
 
     # Unload model from VRAM immediately (Ollama keep_alive=0)
     try:
@@ -748,7 +705,7 @@ def main():
         print(f'[agent] VRAM unload skipped: {e}', flush=True)
 
 
-def run_deep_scan(model, findings: 'FindingStore', seen_keys: set, strategies: list,
+def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
                   budget_seconds: float, start_time: float):
     """Deep Scan mode: function-level code review with optional verification pass.
 
@@ -839,7 +796,7 @@ def run_deep_scan(model, findings: 'FindingStore', seen_keys: set, strategies: l
             return
         seen_keys.add(key)
         f_obj = Finding(severity, category, ffile, desc)
-        findings.append(f_obj)  # writes to CSV immediately
+        findings.append(f_obj)
         print(f'AGENT_FINDING:{json.dumps(f_obj.to_dict())}', flush=True)
         print(f'[deep] [{severity}] {ffile}: {desc[:100]}', flush=True)
 

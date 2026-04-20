@@ -90,9 +90,13 @@ def _build_code_docs() -> list[Document]:
         lines = content.splitlines(keepends=True)
         units = split_file_into_units(lines, fpath, max_unit=120)
 
+        # nomic-embed-text / snowflake-arctic-embed2 / bge-m3: 8192-token context; ~4 chars/token → ~30000 chars safe limit
+        _MAX_CHARS = 30000
         if units:
             for u in units:
                 body = ''.join(lines[u.start:u.end])
+                if len(body) > _MAX_CHARS:
+                    body = body[:_MAX_CHARS]
                 label = u.label or f'lines {u.start+1}-{u.end}'
                 all_docs.append(Document(
                     page_content=f'# {rel} — {label} (lines {u.start+1}-{u.end})\n{body}',
@@ -106,8 +110,8 @@ def _build_code_docs() -> list[Document]:
                     },
                 ))
         else:
-            # Fallback: no functions detected → one chunk capped at 3000 chars
-            trimmed = content[:3000]
+            # Fallback: no functions detected → one chunk capped at 30000 chars
+            trimmed = content[:30000]
             all_docs.append(Document(
                 page_content=f'# {rel}\n{trimmed}',
                 metadata={'source': rel, 'language': ext.lstrip('.')},

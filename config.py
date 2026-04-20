@@ -6,7 +6,7 @@ VAULT_CODE_PATH = r"C:\natMSSObsidian\natMSS\Code"
 STATE_FILE      = r"C:\natMSSObsidian\natMSS\.indexer_state.json"
 
 LLM_MODEL   = "qwen2.5-coder:32b"
-EMBED_MODEL = "mxbai-embed-large"
+EMBED_MODEL = "bge-m3"
 # variants for embedings:
 #mxbai-embed-large
 #nomic-embed-text
