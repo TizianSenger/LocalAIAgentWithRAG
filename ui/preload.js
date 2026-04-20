@@ -51,7 +51,7 @@ contextBridge.exposeInMainWorld('api', {
   generateGraph:  ()      => ipcRenderer.invoke('generate-graph'),
 
   // Agent
-  startAgent: (opts) => ipcRenderer.send('start-agent', opts),
+  startAgent: () => ipcRenderer.send('start-agent'),
   stopAgent:  ()     => ipcRenderer.send('stop-agent'),
   onAgentProgress: (cb) => ipcRenderer.on('agent-progress', (_, d) => cb(d)),
   onAgentFinding:  (cb) => ipcRenderer.on('agent-finding',  (_, d) => cb(d)),

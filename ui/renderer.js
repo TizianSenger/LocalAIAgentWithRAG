@@ -629,29 +629,20 @@ document.getElementById('btn-agent-advanced').addEventListener('click', function
 
 function startAgent () {
   if (agentRunning) return
-  const fullScan  = document.getElementById('agent-full-scan').checked
-  const deepScan  = document.getElementById('agent-deep-scan').checked
-  const budget    = fullScan || deepScan ? 0 : (parseInt(document.getElementById('agent-budget').value, 10) || 60)
-  const focus     = document.getElementById('agent-focus').value
-  const maxCalls  = parseInt(document.getElementById('agent-max-calls').value,  10) || 60
-  const grepLimit = parseInt(document.getElementById('agent-grep-limit').value, 10) || 50
-  const notesK    = parseInt(document.getElementById('agent-notes-k').value,    10) || 8
-  const mode      = deepScan ? 'deep' : 'explore'
 
   // Clear previous findings
   agentFindings.innerHTML = '<div style="color:var(--text-muted);font-size:13px;text-align:center;margin-top:40px">Agent is running… findings will appear here.</div>'
   agentStatusText.textContent = 'Starting…'
   setAgentRunning(true)
-  // Start timer
+  // Start timer (no budget limit)
   _agentStartTime = Date.now()
-  _agentBudgetMs  = budget * 60 * 1000
+  _agentBudgetMs  = 0
   _tickAgentTimer()
   _agentTimerID = setInterval(_tickAgentTimer, 1000)
 
-  const modeLabel = deepScan ? 'Deep Scan (every file)' : fullScan ? 'Full Scan (unlimited)' : budget + ' min'
-  appendLog({ source: 'agent', text: `Agent started — mode: ${mode}, budget: ${modeLabel}, focus: ${focus}, max_calls: ${maxCalls}`, type: 'info', ts: timestamp() })
+  appendLog({ source: 'agent', text: 'Agent started — Deep Scan, all strategies, no time limit', type: 'info', ts: timestamp() })
 
-  window.api.startAgent({ budgetMinutes: budget, focus, maxCalls, grepLimit, notesK, mode })
+  window.api.startAgent()
 }
 
 btnAgentStart.addEventListener('click', startAgent)

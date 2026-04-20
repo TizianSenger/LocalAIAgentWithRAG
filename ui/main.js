@@ -306,16 +306,8 @@ ipcMain.on('start-chat-api', () => {
 ipcMain.on('stop-chat-api',  () => killProc('chatApi'))
 
 // Agent
-ipcMain.on('start-agent', (_, { budgetMinutes, focus, maxCalls, grepLimit, notesK, mode }) => {
-  const args = [
-    '-u', '-B', path.join(SCRIPTS_DIR, 'agent.py'),
-    '--budget-minutes', String(budgetMinutes != null && budgetMinutes > 0 ? budgetMinutes : 0),
-    '--focus',          focus || 'all',
-    '--max-calls',      String(maxCalls  || 60),
-    '--grep-limit',     String(grepLimit || 50),
-    '--notes-k',        String(notesK    || 8),
-    '--mode',           mode || 'explore',
-  ]
+ipcMain.on('start-agent', (_) => {
+  const args = ['-u', '-B', path.join(SCRIPTS_DIR, 'agent.py')]
   const proc = spawn(PYTHON, args, { cwd: SCRIPTS_DIR, shell: true, env: { ...process.env, ...pyEnv() } })
   procs.agent = proc
 

@@ -1,6 +1,4 @@
-import ast
 import os
-import re
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import ObsidianLoader
@@ -8,6 +6,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import VAULT_PATH, EMBED_MODEL, REPO_PATH, SKIP_DIRS
+from code_units import split_file_into_units
 
 # Persistent DB lives next to this script so it survives restarts
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -67,114 +66,6 @@ _CODE_INDEX_EXTS = {
 _CODE_CHROMA_DIR = os.path.join(_SCRIPT_DIR, 'chrome_code_db')
 
 
-class _PyVisitor(ast.NodeVisitor):
-    """Extract top-level functions and class methods via Python AST."""
-
-    def __init__(self, lines: list[str], rel_path: str):
-        self._lines     = lines
-        self._rel_path  = rel_path
-        self._class_stk: list[str] = []
-        self.docs: list[Document]  = []
-
-    def _add(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        start = node.lineno - 1
-        end   = getattr(node, 'end_lineno', min(start + 120, len(self._lines)))
-        body  = '\n'.join(self._lines[start:end])
-        cls   = self._class_stk[-1] if self._class_stk else ''
-        label = f'{cls}.{node.name}' if cls else node.name
-        self.docs.append(Document(
-            page_content=f'# {self._rel_path} — {label} (lines {node.lineno}-{end})\n{body}',
-            metadata={
-                'source':     self._rel_path,
-                'language':   'python',
-                'class':      cls,
-                'method':     node.name,
-                'start_line': node.lineno,
-                'end_line':   end,
-            },
-        ))
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self._class_stk.append(node.name)
-        self.generic_visit(node)   # recurse into class body to find methods
-        self._class_stk.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._add(node)
-        # Do NOT recurse — skip nested functions inside methods
-
-    visit_AsyncFunctionDef = visit_FunctionDef
-
-
-def _extract_python(filepath: str, content: str) -> list[Document]:
-    lines = content.splitlines()
-    try:
-        tree = ast.parse(content, filename=filepath)
-    except SyntaxError:
-        return []
-    rel = os.path.relpath(filepath, REPO_PATH).replace('\\', '/')
-    v   = _PyVisitor(lines, rel)
-    v.visit(tree)
-    return v.docs
-
-
-# Patterns that mark the start of a named function/method in JS/TS/CS/Java etc.
-_FUNC_START_RE = re.compile(
-    r'^(?P<indent>[ \t]{0,8})'
-    r'(?:(?:export|default|public|private|protected|static|abstract|override|'
-    r'sealed|async|readonly|virtual|internal|extern)\s+)*'
-    r'(?:async\s+)?'
-    r'(?:'
-    r'function\s+(?P<fn1>\w+)\s*[(<]'            # function declaration
-    r'|(?:const|let|var)\s+(?P<fn2>\w+)\s*='    # const/let/var = arrow/function
-    r'|(?:def|sub|end\s+sub)\s+(?P<fn3>\w+)\s*\('  # Python-like (PS1)
-    r'|(?P<fn4>[a-zA-Z_]\w*)\s*\('              # method call / class method
-    r')',
-    re.MULTILINE,
-)
-
-
-def _extract_generic(filepath: str, content: str) -> list[Document]:
-    """Regex-based method extraction for JS/TS/CS/Java/etc."""
-    lines   = content.splitlines()
-    rel     = os.path.relpath(filepath, REPO_PATH).replace('\\', '/')
-    ext     = os.path.splitext(filepath)[1].lstrip('.')
-    matches = list(_FUNC_START_RE.finditer(content))
-    if not matches:
-        return []
-
-    docs: list[Document] = []
-    for i, m in enumerate(matches):
-        # Resolve function name from whichever capture group matched
-        func_name = m.group('fn1') or m.group('fn2') or m.group('fn3') or m.group('fn4') or 'unknown'
-        # Skip noise: very short names, keywords, common false-positives
-        if func_name in {'if', 'for', 'while', 'switch', 'catch', 'return',
-                         'import', 'from', 'class', 'new', 'throw', 'var',
-                         'let', 'const', 'await', 'super', 'this', 'console'}:
-            continue
-        start_line = content[:m.start()].count('\n')
-        # End = next match start (same or lower indent), capped at 100 lines
-        end_line = start_line + 100
-        if i + 1 < len(matches):
-            next_start = content[:matches[i + 1].start()].count('\n')
-            indent_here = len(m.group('indent'))
-            next_indent = len(matches[i + 1].group('indent'))
-            if next_indent <= indent_here:
-                end_line = min(next_start, start_line + 100)
-        end_line = min(end_line, len(lines))
-        body = '\n'.join(lines[start_line:end_line])
-        docs.append(Document(
-            page_content=f'# {rel} — {func_name} (line {start_line + 1})\n{body}',
-            metadata={
-                'source':     rel,
-                'language':   ext,
-                'method':     func_name,
-                'start_line': start_line + 1,
-            },
-        ))
-    return docs
-
-
 def _walk_code_files():
     """Yield (abs_path, content) for every indexable source file in REPO_PATH."""
     for root, dirs, files in os.walk(REPO_PATH):
@@ -195,15 +86,27 @@ def _build_code_docs() -> list[Document]:
     all_docs: list[Document] = []
     for fpath, content in _walk_code_files():
         ext = os.path.splitext(fpath)[1].lower()
-        if ext == '.py':
-            units = _extract_python(fpath, content)
-        else:
-            units = _extract_generic(fpath, content)
+        rel = os.path.relpath(fpath, REPO_PATH).replace('\\', '/')
+        lines = content.splitlines(keepends=True)
+        units = split_file_into_units(lines, fpath, max_unit=120)
+
         if units:
-            all_docs.extend(units)
+            for u in units:
+                body = ''.join(lines[u.start:u.end])
+                label = u.label or f'lines {u.start+1}-{u.end}'
+                all_docs.append(Document(
+                    page_content=f'# {rel} — {label} (lines {u.start+1}-{u.end})\n{body}',
+                    metadata={
+                        'source':     rel,
+                        'language':   ext.lstrip('.'),
+                        'class':      u.cls,
+                        'method':     u.name,
+                        'start_line': u.start + 1,
+                        'end_line':   u.end,
+                    },
+                ))
         else:
-            # Fallback: file has no detectable functions → add as one chunk (capped)
-            rel = os.path.relpath(fpath, REPO_PATH).replace('\\', '/')
+            # Fallback: no functions detected → one chunk capped at 3000 chars
             trimmed = content[:3000]
             all_docs.append(Document(
                 page_content=f'# {rel}\n{trimmed}',

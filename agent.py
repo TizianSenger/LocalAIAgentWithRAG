@@ -24,6 +24,7 @@ import sys
 import json
 import re
 import time
+import csv
 import argparse
 import textwrap
 import threading
@@ -36,6 +37,45 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from config import REPO_PATH, VAULT_PATH, LLM_MODEL, SKIP_DIRS, CODE_EXTENSIONS
 from dep_graph import load_graph, get_dependents, get_class_info
+from code_units import split_file_into_units
+
+# ── Persistent finding store (temp CSV) ─────────────────────────────────────
+
+class FindingStore:
+    """Writes findings immediately to a temp CSV; never keeps them all in RAM.
+    Provides a row-count and a load() method for end-of-run report generation.
+    """
+    _FIELDS = ('severity', 'category', 'file', 'description', 'ts')
+
+    def __init__(self, path: str):
+        self.path  = path
+        self._count = 0
+        with open(path, 'w', newline='', encoding='utf-8') as fh:
+            csv.DictWriter(fh, fieldnames=self._FIELDS).writeheader()
+
+    def append(self, finding: 'Finding') -> None:
+        with open(self.path, 'a', newline='', encoding='utf-8') as fh:
+            csv.DictWriter(fh, fieldnames=self._FIELDS).writerow(finding.to_dict())
+        self._count += 1
+
+    def __len__(self) -> int:
+        return self._count
+
+    def load(self) -> list['Finding']:
+        result = []
+        with open(self.path, newline='', encoding='utf-8') as fh:
+            for row in csv.DictReader(fh):
+                f = Finding(row['severity'], row['category'], row['file'], row['description'])
+                f.ts = row['ts']
+                result.append(f)
+        return result
+
+    def delete(self) -> None:
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
 
 # ── Allow UI to override model ────────────────────────────────────────────────
 LLM_MODEL = os.environ.get('OVERRIDE_AGENT_MODEL', os.environ.get('OVERRIDE_LLM_MODEL', LLM_MODEL))
@@ -345,7 +385,7 @@ class Finding:
 
 # ── Strategy runner ───────────────────────────────────────────────────────────
 
-def run_strategy(strategy: str, model, findings: list, seen_keys: set,
+def run_strategy(strategy: str, model, findings: 'FindingStore', seen_keys: set,
                  budget_seconds: float, start_time: float) -> int:
     """Run one analysis strategy. Returns number of tool calls made.
     seen_keys: shared set of (file, description_prefix) to avoid duplicate findings.
@@ -482,7 +522,7 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
             else:
                 seen_keys.add(dedup_key)
                 f = Finding(severity, category, file_path, description)
-                findings.append(f)
+                findings.append(f)  # writes to CSV immediately
                 print(f'AGENT_FINDING:{json.dumps(f.to_dict())}', flush=True)
                 _emit_progress(strategy=strategy, tool_calls=tool_calls, findings=len(findings))
                 conversation.append(HumanMessage(content=f'Finding recorded: [{f.severity}] {f.description}. Good work! Now keep investigating — there may be more issues. Use GREP, READ_FILE, or LIST_FILES to explore further. Do NOT say DONE yet.'))
@@ -507,6 +547,81 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
 
 
 # ── Report generator ──────────────────────────────────────────────────────────
+
+def cluster_findings(findings: list) -> list:
+    """Merge similar findings within the same severity+category into clusters.
+
+    Two findings are "similar" when their description keyword sets overlap
+    by Jaccard ≥ 0.25 (about 1-in-4 meaningful words in common).
+    Groups of MIN_CLUSTER (3) or more are merged into a single cluster Finding;
+    smaller groups are kept as-is.
+    """
+    from collections import defaultdict as _dd
+
+    _STOP = {
+        'a', 'an', 'the', 'in', 'on', 'at', 'to', 'of', 'and', 'or',
+        'is', 'are', 'was', 'be', 'by', 'for', 'with', 'this', 'that',
+        'it', 'as', 'from', 'via', 'not', 'no', 'may', 'can', 'could',
+        'should', 'will', 'has', 'have', 'its', 'but', 'also', 'into',
+        'when', 'if', 'than', 'line', 'file', 'code', 'class', 'method',
+        'function', 'variable', 'value', 'string', 'type', 'object',
+        'return', 'used', 'using', 'call', 'calls', 'called',
+    }
+
+    def _kw(text: str) -> frozenset:
+        words = re.findall(r'[a-zA-Z_]\w*', text.lower())
+        return frozenset(w for w in words if len(w) > 3 and w not in _STOP)
+
+    def _jaccard(a: frozenset, b: frozenset) -> float:
+        union = len(a | b)
+        return len(a & b) / union if union else 0.0
+
+    THRESHOLD  = 0.25
+    MIN_CLUSTER = 3
+
+    buckets: dict = _dd(list)
+    for f in findings:
+        buckets[(f.severity, f.category)].append(f)
+
+    result = []
+    for (sev, cat), group in buckets.items():
+        if len(group) < MIN_CLUSTER:
+            result.extend(group)
+            continue
+
+        kw_list = [_kw(f.description) for f in group]
+        clusters: list[list[int]] = []
+
+        for i, kw in enumerate(kw_list):
+            placed = False
+            for cl in clusters:
+                if _jaccard(kw, kw_list[cl[0]]) >= THRESHOLD:
+                    cl.append(i)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([i])
+
+        for cl in clusters:
+            members = [group[i] for i in cl]
+            if len(members) < MIN_CLUSTER:
+                result.extend(members)
+                continue
+
+            files = list(dict.fromkeys(m.file for m in members))
+            rep   = members[0]
+            file_list = ', '.join(f'`{f}`' for f in files)
+            merged_desc = (
+                f'[CLUSTER · {len(members)} occurrences in {len(files)} file(s)] '
+                f'{rep.description} — also in: {file_list}'
+            )
+            merged    = Finding(rep.severity, rep.category, files[0], merged_desc)
+            merged.ts = rep.ts
+            result.append(merged)
+            print(f'[cluster] {sev}/{cat}: merged {len(members)} findings → 1 cluster', flush=True)
+
+    return result
+
 
 def generate_report(findings: list[Finding], strategies_run: list[str], elapsed: float) -> str:
     """Generate a Markdown report from findings."""
@@ -580,58 +695,32 @@ def _emit_progress(strategy: str, tool_calls: int, findings: int):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--budget-minutes', type=float, default=60.0,
-                        help='Time budget in minutes (default: 60)')
-    parser.add_argument('--focus', type=str, default='all',
-                        help=f'Comma-separated strategies or "all". Options: {", ".join(STRATEGIES)}')
     parser.add_argument('--report-path', type=str, default='',
                         help='Override output path for the report')
-    parser.add_argument('--max-calls', type=int, default=60,
-                        help='Max LLM tool-calls per strategy (default: 60)')
-    parser.add_argument('--grep-limit', type=int, default=50,
-                        help='Max grep results per search (default: 50)')
-    parser.add_argument('--notes-k', type=int, default=8,
-                        help='Number of vault notes retrieved per SEARCH_NOTES call (default: 8)')
-    parser.add_argument('--mode', type=str, default='explore',
-                        choices=['explore', 'deep'],
-                        help='explore = smart GREP-based agent (default); deep = reads every file line-by-line')
     args = parser.parse_args()
 
-    # Populate runtime settings
-    _SETTINGS['max_calls']  = args.max_calls
-    _SETTINGS['grep_limit'] = args.grep_limit
-    _SETTINGS['notes_k']    = args.notes_k
+    focus = STRATEGIES  # always all strategies
 
-    budget_seconds = args.budget_minutes * 60 if args.budget_minutes > 0 else float('inf')
-    _no_budget = args.budget_minutes == 0
-    focus = [s.strip() for s in args.focus.split(',')] if args.focus != 'all' else STRATEGIES
-    focus = [s for s in focus if s in STRATEGIES]
-    if not focus:
-        focus = STRATEGIES
-
-    print(f'[agent] Starting — mode: {args.mode}, budget: {"unlimited" if args.budget_minutes == 0 else str(args.budget_minutes) + " min"}, strategies: {focus}', flush=True)
-    print(f'[agent] Settings — max_calls: {args.max_calls}, grep_limit: {args.grep_limit}, notes_k: {args.notes_k}', flush=True)
+    print(f'[agent] Starting — mode: deep scan, budget: unlimited, strategies: {focus}', flush=True)
     print(f'[agent] Model: {LLM_MODEL}', flush=True)
     _emit_progress(strategy='init', tool_calls=0, findings=0)
 
     llm_timeout = _get_model_timeout(LLM_MODEL)
     print(f'[agent] LLM timeout: {llm_timeout}s (based on model size)', flush=True)
     model      = OllamaLLM(model=LLM_MODEL, temperature=0.1, timeout=llm_timeout)
-    findings   = []
+    ts_str     = datetime.now().strftime('%Y%m%d_%H%M%S')
+    tmp_csv    = os.path.join(REPORT_DIR, f'.findings_tmp_{ts_str}.csv')
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    store      = FindingStore(tmp_csv)
     seen_keys  = set()
     start_time = time.time()
 
-    if args.mode == 'deep':
-        run_deep_scan(model, findings, seen_keys, focus, budget_seconds, start_time)
-    else:
-        for strategy in focus:
-            if time.time() - start_time > budget_seconds:
-                print('[agent] Time budget reached — stopping early.', flush=True)
-                break
-            run_strategy(strategy, model, findings, seen_keys, budget_seconds, start_time)
+    run_deep_scan(model, store, seen_keys, focus, float('inf'), start_time)
 
-    elapsed = time.time() - start_time
-    report  = generate_report(findings, focus, elapsed)
+    elapsed  = time.time() - start_time
+    findings = cluster_findings(store.load())
+    store.delete()
+    report   = generate_report(findings, focus, elapsed)
 
     # Save report
     os.makedirs(REPORT_DIR, exist_ok=True)
@@ -642,7 +731,7 @@ def main():
         f.write(report)
 
     print(f'[agent] Report saved to: {report_path}', flush=True)
-    print(f'AGENT_DONE:{json.dumps({"findings": len(findings), "report_path": report_path, "elapsed_min": round(elapsed/60, 1)})}', flush=True)
+    print(f'AGENT_DONE:{json.dumps({"findings": len(findings), "report_path": report_path, "elapsed_min": round(elapsed/60, 1)})}', flush=True)  # findings list is small here (clustered)
 
     # Unload model from VRAM immediately (Ollama keep_alive=0)
     try:
@@ -659,50 +748,7 @@ def main():
         print(f'[agent] VRAM unload skipped: {e}', flush=True)
 
 
-def _split_into_units(lines: list, header_end: int, max_unit: int = 250) -> list:
-    """Split source lines into logical units at top-level function/class boundaries.
-
-    Returns list of (start_line_0based, end_line_exclusive) tuples.
-    Each unit is guaranteed ≤ max_unit lines (hard split if needed).
-    The file header (imports / module docstring up to header_end) is always
-    included as the first unit so every call sees the imports.
-    """
-    TOP_LEVEL_STARTERS = ('def ', 'async def ', 'class ', '# %%', '// ')
-    units: list = []
-
-    # First unit = file header block (always sent)
-    if header_end > 0 and len(lines) > header_end:
-        units.append((0, header_end))
-
-    unit_start = header_end
-    for i in range(header_end, len(lines)):
-        stripped = lines[i].lstrip()
-        indent   = len(lines[i]) - len(stripped)
-        is_boundary = (
-            indent == 0
-            and any(stripped.startswith(s) for s in TOP_LEVEL_STARTERS)
-            and i > unit_start + 4          # at least 5 lines in previous unit
-        )
-        if is_boundary or (i - unit_start) >= max_unit:
-            if i > unit_start:
-                units.append((unit_start, i))
-            unit_start = i
-
-    if unit_start < len(lines):
-        units.append((unit_start, len(lines)))
-
-    # Hard-split any unit that is still too long
-    result: list = []
-    for (s, e) in units:
-        if e - s <= max_unit:
-            result.append((s, e))
-        else:
-            for split_s in range(s, e, max_unit):
-                result.append((split_s, min(split_s + max_unit, e)))
-    return result
-
-
-def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
+def run_deep_scan(model, findings: 'FindingStore', seen_keys: set, strategies: list,
                   budget_seconds: float, start_time: float):
     """Deep Scan mode: function-level code review with optional verification pass.
 
@@ -727,7 +773,7 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
         '.sh', '.bat', '.ps1',
         '.sql', '.graphql',
     }
-    HEADER_ROWS  = 80    # lines treated as file header (imports / module doc)
+    HEADER_ROWS  = 80    # lines prepended as context to every method unit
     MAX_UNIT     = 150   # max lines per function/class unit (smaller = faster LLM)
     MIN_DESC_LEN = 40    # discard one-liner non-specific descriptions shorter than this
 
@@ -793,7 +839,7 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
             return
         seen_keys.add(key)
         f_obj = Finding(severity, category, ffile, desc)
-        findings.append(f_obj)
+        findings.append(f_obj)  # writes to CSV immediately
         print(f'AGENT_FINDING:{json.dumps(f_obj.to_dict())}', flush=True)
         print(f'[deep] [{severity}] {ffile}: {desc[:100]}', flush=True)
 
@@ -894,24 +940,26 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
 
         header_end   = min(HEADER_ROWS, total_lines)
         header_block = ''.join(all_lines[:header_end])
-        units        = _split_into_units(all_lines, header_end, MAX_UNIT)
+        units        = split_file_into_units(all_lines, fpath, MAX_UNIT)
 
-        for (u_start, u_end) in units:
+        for unit in units:
             if time.time() - start_time > budget_seconds:
                 break
 
+            u_start, u_end = unit.start, unit.end
             unit_lines = all_lines[u_start:u_end]
             call_no   += 1
 
-            # Always prepend the header so the LLM sees imports/globals
+            # Prepend the file header as context so LLM sees imports/globals
+            unit_label = f' [{unit.label}]' if unit.label else ''
             if u_start >= header_end:
                 preamble = (
                     f'=== {rel} — module header (lines 1–{header_end}, for context) ===\n'
                     + header_block
-                    + f'=== section to review: lines {u_start+1}–{u_end} ===\n'
+                    + f'=== {unit_label.strip() or "section"} to review: lines {u_start+1}–{u_end} ===\n'
                 )
             else:
-                preamble = f'=== {rel} — lines {u_start+1}–{u_end} (full file header) ===\n'
+                preamble = f'=== {rel}{unit_label} — lines {u_start+1}–{u_end} ===\n'
 
             user_msg = preamble + ''.join(unit_lines)
             label    = f'{rel}:{u_start+1}-{u_end}'
@@ -922,11 +970,106 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
                 continue
 
             for (sev, cat, ff, desc) in _parse_candidates(resp, rel):
-                # store snippet for verification (surrounding ±10 lines in file)
+                # store snippet for verification (surrounding ±5 lines in file)
                 snip_start = max(0, u_start - 5)
                 snip_end   = min(total_lines, u_end + 5)
                 snippet    = ''.join(all_lines[snip_start:snip_end])
                 candidates.append((sev, cat, ff, desc, snippet))
+
+    # ── Phase 1.5: cross-file context ────────────────────────────────────────
+    # For each CRITICAL/HIGH candidate, look up callers via dep_graph and scan
+    # the units in those files that actually call the flagged function.
+    _cross_scanned: set = set()   # (abs_path, unit_start) already scanned
+
+    def _extract_symbol(desc: str) -> str:
+        """Pull the most likely function/class name out of a finding description."""
+        # Look for word() pattern first — most specific
+        m = re.search(r'\b([A-Za-z_]\w+)\s*\(', desc)
+        if m:
+            return m.group(1)
+        # Fall back to CamelCase word
+        m = re.search(r'\b([A-Z][a-z]+[A-Za-z0-9]+)\b', desc)
+        if m:
+            return m.group(1)
+        return ''
+
+    high_critical = [(sev, cat, ff, desc, snip)
+                     for (sev, cat, ff, desc, snip) in candidates
+                     if sev in ('CRITICAL', 'HIGH')]
+
+    if high_critical:
+        print(f'[deep] Cross-file scan: checking callers for {len(high_critical)} CRITICAL/HIGH candidates…', flush=True)
+
+    for (sev, cat, ff, desc, _snip) in high_critical:
+        if time.time() - start_time > budget_seconds:
+            break
+
+        symbol = _extract_symbol(desc)
+        if not symbol:
+            continue
+
+        caller_files = get_dependents(symbol)
+        if not caller_files:
+            continue
+
+        print(f'[deep] [{symbol}] {len(caller_files)} caller file(s) to check', flush=True)
+
+        for caller_rel in caller_files[:5]:   # cap at 5 callers per finding
+            if time.time() - start_time > budget_seconds:
+                break
+
+            caller_abs = os.path.join(REPO_PATH, caller_rel.replace('/', os.sep))
+            if not os.path.isfile(caller_abs):
+                continue
+
+            try:
+                with open(caller_abs, encoding='utf-8', errors='ignore') as fh:
+                    caller_lines = fh.readlines()
+            except OSError:
+                continue
+
+            caller_units = split_file_into_units(caller_lines, caller_abs, MAX_UNIT)
+            caller_total = len(caller_lines)
+            caller_header_end = min(HEADER_ROWS, caller_total)
+            caller_header = ''.join(caller_lines[:caller_header_end])
+
+            for cu in caller_units:
+                if (caller_abs, cu.start) in _cross_scanned:
+                    continue
+
+                # Only scan units that actually reference the flagged symbol
+                unit_text = ''.join(caller_lines[cu.start:cu.end])
+                if symbol not in unit_text:
+                    continue
+
+                _cross_scanned.add((caller_abs, cu.start))
+                call_no += 1
+
+                cx_label = f'{caller_rel}:{cu.start+1}-{cu.end}'
+                unit_label = f' [{cu.label}]' if cu.label else ''
+                if cu.start >= caller_header_end:
+                    preamble = (
+                        f'=== {caller_rel} — module header (lines 1–{caller_header_end}, for context) ===\n'
+                        + caller_header
+                        + f'=== CALLER of {symbol}{unit_label}: lines {cu.start+1}–{cu.end} ===\n'
+                        + f'[Context: this code calls {symbol} which has a known {sev} issue: {desc[:120]}]\n'
+                    )
+                else:
+                    preamble = (
+                        f'=== {caller_rel}{unit_label} — lines {cu.start+1}–{cu.end} ===\n'
+                        + f'[Context: this code calls {symbol} which has a known {sev} issue: {desc[:120]}]\n'
+                    )
+
+                _emit_progress(strategy=f'deep:xref:{caller_rel}', tool_calls=call_no, findings=len(findings))
+                resp = _call_llm(preamble + unit_text, cx_label)
+                if not resp or resp.upper() == 'NONE':
+                    continue
+
+                for (xsev, xcat, xff, xdesc) in _parse_candidates(resp, caller_rel):
+                    snip_start = max(0, cu.start - 5)
+                    snip_end   = min(caller_total, cu.end + 5)
+                    snippet    = ''.join(caller_lines[snip_start:snip_end])
+                    candidates.append((xsev, xcat, xff, xdesc, snippet))
 
     # ── Phase 2: verify ───────────────────────────────────────────────────────
     # Only verify MEDIUM/LOW — CRITICAL and HIGH are recorded directly
