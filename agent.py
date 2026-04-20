@@ -26,6 +26,7 @@ import re
 import time
 import argparse
 import textwrap
+import threading
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +81,28 @@ def tool_search_notes(query: str, k: int = 8) -> str:
         return '\n\n---\n\n'.join(parts)
     except Exception as e:
         return f'search_notes error: {e}'
+
+
+def tool_search_code(query: str, k: int = 12) -> str:
+    """Search the method-level source code index using ChromaDB."""
+    k = _SETTINGS.get('code_k', k)
+    try:
+        from vector import code_retriever
+        docs = code_retriever.invoke(query)[:k]
+        if not docs:
+            return 'No matching code units found.'
+        parts = []
+        for d in docs:
+            src    = d.metadata.get('source', 'unknown')
+            method = d.metadata.get('method', '')
+            cls    = d.metadata.get('class', '')
+            line   = d.metadata.get('start_line', '')
+            label  = f'{cls}.{method}' if cls else method
+            header = f'[{src}:{line}] {label}' if label else f'[{src}:{line}]'
+            parts.append(f'{header}\n{d.page_content[:800]}')
+        return '\n\n---\n\n'.join(parts)
+    except Exception as e:
+        return f'search_code error: {e}'
 
 
 def tool_grep(pattern: str, file_ext: str = '', max_results: int = 50) -> str:
@@ -189,6 +212,14 @@ SEARCH_NOTES(<query>)
   Search the documentation vault for notes matching the query.
   Example: SEARCH_NOTES(authentication login user session)
 
+SEARCH_CODE(<query>)
+  Search the method-level source code index. Returns actual function/method bodies
+  with file path, class name, and line numbers. Use this to find and inspect specific
+  implementations directly — much faster than GREP + READ_FILE for known concepts.
+  Example: SEARCH_CODE(infer_memory_room classification)
+  Example: SEARCH_CODE(load_settings API key encryption)
+  Example: SEARCH_CODE(race condition browser close web_agent)
+
 GREP(<pattern>, <extension>)
   Search all files with given extension for a regex pattern.
   Example: GREP(password.*=.*"[^"]+", .py)
@@ -223,16 +254,16 @@ Your task is to find real issues in the code for the category: {category}.
 {tools}
 
 WORKFLOW:
-1. Start with SEARCH_NOTES or LIST_FILES to orient yourself in the codebase.
-2. Use GREP to find suspicious patterns.
+1. Start with SEARCH_CODE or SEARCH_NOTES to find relevant implementations quickly.
+2. Use GREP for additional pattern-based discovery across the full codebase.
 3. For each suspicious GREP hit: call READ_FILE on that file to inspect the actual code.
-4. ONLY AFTER reading the file, call WRITE_FINDING if a real issue is confirmed.
+4. ONLY AFTER reading the file (or after SEARCH_CODE returned the actual body), call WRITE_FINDING if a real issue is confirmed.
 5. Keep investigating different files and patterns until you have exhausted the category.
 6. When done (minimum 6 tool calls), output exactly: DONE
 
 RULES:
 - Call exactly ONE tool per message. Wait for the result before the next call.
-- CRITICAL: You MUST call READ_FILE on a file BEFORE you may call WRITE_FINDING for it. GREP alone is never sufficient evidence.
+- CRITICAL: You MUST call READ_FILE on a file (or have seen the code via SEARCH_CODE) BEFORE you may call WRITE_FINDING for it. GREP alone is never sufficient evidence.
 - Never repeat the same tool call with identical arguments more than once.
 - Only call WRITE_FINDING for real, specific issues confirmed by reading actual code — include the exact file path and the problematic line/function.
 - Do NOT say DONE before making at least 6 tool calls.
@@ -242,7 +273,7 @@ Start now.
 """
 
 _TOOL_CALL_RE = re.compile(
-    r'(SEARCH_NOTES|GREP|READ_FILE|LIST_FILES|GET_DEPENDENTS|GET_CLASS_INFO|WRITE_FINDING)\((.+?)\)',
+    r'(SEARCH_NOTES|SEARCH_CODE|GREP|READ_FILE|LIST_FILES|GET_DEPENDENTS|GET_CLASS_INFO|WRITE_FINDING)\((.+?)\)',
     re.DOTALL
 )
 
@@ -266,6 +297,8 @@ def _parse_tool_call(text: str):
 def _run_tool(name: str, args: list) -> str:
     if name == 'SEARCH_NOTES':
         return tool_search_notes(args[0] if args else '')
+    if name == 'SEARCH_CODE':
+        return tool_search_code(args[0] if args else '')
     if name == 'GREP':
         pattern = args[0] if args else ''
         ext     = args[1].strip() if len(args) > 1 else ''
@@ -460,6 +493,10 @@ def run_strategy(strategy: str, model, findings: list, seen_keys: set,
                 read_path = tool_args[0].split(',')[0].strip().replace('\\', '/').lower()
                 files_read.add(read_path)
             result = _run_tool(tool_name, tool_args)
+            # SEARCH_CODE results embed the file path in the page_content header — extract them
+            if tool_name == 'SEARCH_CODE':
+                for hit in re.findall(r'#\s+([\w./\-]+)\s+—', result):
+                    files_read.add(hit.lower())
             # Truncate very long results
             if len(result) > 3000:
                 result = result[:3000] + '\n... (truncated)'
@@ -691,7 +728,7 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
         '.sql', '.graphql',
     }
     HEADER_ROWS  = 80    # lines treated as file header (imports / module doc)
-    MAX_UNIT     = 250   # max lines per function/class unit
+    MAX_UNIT     = 150   # max lines per function/class unit (smaller = faster LLM)
     MIN_DESC_LEN = 40    # discard one-liner non-specific descriptions shorter than this
 
     strat_text = '\n'.join(f'- {STRATEGY_DESCRIPTIONS[s]}' for s in strategies)
@@ -761,17 +798,35 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
         print(f'[deep] [{severity}] {ffile}: {desc[:100]}', flush=True)
 
     def _call_llm(user_msg: str, label: str) -> str | None:
+        # Per-call timeout so a stuck LLM doesn't freeze the whole scan
+        llm_timeout = _get_model_timeout(LLM_MODEL)
         for attempt in range(3):
-            try:
-                print(f'[agent] Querying LLM… ({label})', flush=True)
-                return str(model.invoke([
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_msg),
-                ])).strip()
-            except Exception as exc:
+            result_box: list = []
+            exc_box:    list = []
+
+            def _invoke():
+                try:
+                    result_box.append(str(model.invoke([
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=user_msg),
+                    ])).strip())
+                except Exception as exc:
+                    exc_box.append(exc)
+
+            t = threading.Thread(target=_invoke, daemon=True)
+            print(f'[agent] Querying LLM… ({label})', flush=True)
+            t.start()
+            t.join(timeout=llm_timeout)
+            if t.is_alive():
+                print(f'[deep] LLM timeout after {llm_timeout}s on {label} (attempt {attempt+1}/3) — skipping', flush=True)
+                # Don't retry a timed-out call — move on
+                return None
+            if exc_box:
                 wait = 2 ** attempt
-                print(f'[deep] LLM error (attempt {attempt+1}/3): {exc} — retry in {wait}s', flush=True)
+                print(f'[deep] LLM error (attempt {attempt+1}/3): {exc_box[0]} — retry in {wait}s', flush=True)
                 time.sleep(wait)
+                continue
+            return result_box[0] if result_box else None
         return None
 
     def _verify_finding(severity: str, category: str, ffile: str, desc: str,
@@ -783,15 +838,25 @@ def run_deep_scan(model, findings: list, seen_keys: set, strategies: list,
             'Is this a GENUINE issue clearly visible in the code above?\n'
             'Answer with YES or NO on the first line, then optionally one sentence of reasoning.'
         )
-        try:
-            print(f'[agent] Querying LLM… (verify)', flush=True)
-            resp = str(model.invoke([
-                SystemMessage(content='You are a code review validator. Be strict — only confirm real issues.'),
-                HumanMessage(content=verify_prompt),
-            ])).strip()
-            return resp.upper().startswith('YES')
-        except Exception:
-            return True  # on failure, keep the finding
+        llm_timeout = _get_model_timeout(LLM_MODEL)
+        result_box: list = []
+
+        def _invoke():
+            try:
+                result_box.append(str(model.invoke([
+                    SystemMessage(content='You are a code review validator. Be strict — only confirm real issues.'),
+                    HumanMessage(content=verify_prompt),
+                ])).strip())
+            except Exception:
+                pass
+
+        print(f'[agent] Querying LLM… (verify)', flush=True)
+        t = threading.Thread(target=_invoke, daemon=True)
+        t.start()
+        t.join(timeout=llm_timeout)
+        if t.is_alive() or not result_box:
+            return True  # timeout or error → keep the finding
+        return result_box[0].upper().startswith('YES')
 
     # ── Collect all code files ────────────────────────────────────────────────
     all_files: list = []
